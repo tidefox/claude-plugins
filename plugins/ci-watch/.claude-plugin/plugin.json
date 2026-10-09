@@ -1,0 +1,22 @@
+{
+  "name": "ci-watch",
+  "version": "0.1.0",
+  "author": { "name": "tidefox" },
+  "description": "Watches CI on pull requests the agent drafts or opens, in a live pane, the status line and a notification when it settles",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "pollSeconds": {
+      "type": "number",
+      "title": "Poll interval (seconds)",
+      "description": "How often gh pr checks is asked while a PR's CI runs",
+      "default": 15
+    },
+    "onFinish": {
+      "type": "string",
+      "title": "When CI settles",
+      "description": "notify: toast and desktop notification. tell-claude: also leave Claude a note with the result. fix-failures: also start a turn asking Claude to fix failing checks",
+      "options": ["notify", "tell-claude", "fix-failures"],
+      "default": "notify"
+    }
+  }
+}
