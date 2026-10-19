@@ -33,6 +33,8 @@ export type Activity = {
   added: number | null
   removed: number | null
   phase: 'running' | 'done' | 'error'
+  /** The edit or write was held for the machine owner to review: the file is unchanged. */
+  isHeld?: boolean
   at: number
   view: FileView | null
 }

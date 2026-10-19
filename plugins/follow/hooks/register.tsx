@@ -184,19 +184,29 @@ function mask(command: string): { masked: string; restore: (s: string) => string
   return { masked, restore: s => unquote(s.replace(/\u0001(\d+)\u0001/g, (_, k: string) => quoted[Number(k)] ?? '')) }
 }
 
+type ShellAccess = { kind: 'read' | 'write'; path: string; from?: number; to?: number; dir?: string }
+
 /**
  * What a shell command does to a file, for the common read and write spellings
  * (`cat`, `head`, `tail`, `sed -n A,Bp`, `nl`, `bat`; `>`, `>>`, `tee`). Null otherwise.
+ * `dir` is a leading `cd <dir>`, which a relative path is read against.
  */
-export function parseShell(
-  command: string,
-): { kind: 'read' | 'write'; path: string; from?: number; to?: number } | null {
+export function parseShell(command: string): ShellAccess | null {
   const found = matchShell(command)
   // A path held in a shell variable cannot be followed.
-  return found && found.path !== '' && !/[$`*?\u0001]/.test(found.path) ? found : null
+  if (!found || found.path === '' || /[$`*?\u0001]/.test(found.path)) return null
+  if (found.path.startsWith('/')) return found
+  const { masked, restore } = mask(command)
+  const cd = /^\s*cd\s+([^\s;&|<>()]+)\s*(?:&&|;)/.exec(masked)
+  const dir = cd?.[1] ? restore(cd[1]) : ''
+  const isFollowed = dir !== '' && dir !== '-' && !/[$`*?~\u0001]/.test(dir)
+  // A relative path after a cd that cannot be followed (a variable, `~`, `-`, a later one) is somewhere unknown.
+  const cds = masked.match(/(?:^|[;&|(]\s*)cd\b/g)?.length ?? 0
+  if (cds === 0) return found
+  return isFollowed && cds === 1 ? { ...found, dir } : null
 }
 
-function matchShell(command: string): { kind: 'read' | 'write'; path: string; from?: number; to?: number } | null {
+function matchShell(command: string): ShellAccess | null {
   const { masked, restore } = mask(command)
   // A file operand: never an option, never a redirect.
   const file = `([^\\s<>|;&()-][^\\s<>|;&()]*)`
@@ -236,13 +246,16 @@ const clean = (line: string) => line.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
 
 // ── capture ────────────────────────────────────────────────────────────────
 
-let cwd = ''
+/** The project root paths are shown against; a shell `cd` does not move it. */
+let root = ''
 let nvimServer = ''
 
-const absolute = (path: string) => (path.startsWith('/') || !cwd ? path : `${cwd.replace(/\/$/, '')}/${path.replace(/^\.\//, '')}`)
+/** `path` against `dir` (the calling loop's directory: a subagent's may be a worktree of its own). */
+const absolute = (path: string, dir: string) =>
+  path.startsWith('/') || !dir ? path : `${dir.replace(/\/$/, '')}/${path.replace(/^\.\//, '')}`
 
 function relative(path: string) {
-  if (cwd && path.startsWith(`${cwd}/`)) return path.slice(cwd.length + 1)
+  if (root && path.startsWith(`${root}/`)) return path.slice(root.length + 1)
   const scratch = /\/scratchpad\/(.*)$/.exec(path)
   if (scratch) return `scratchpad/${scratch[1]}`
   return path.replace(/^\/(?:home|Users)\/[^/]+(?=\/)/, '~')
@@ -264,6 +277,19 @@ async function readText($: EngineInterface, path: string): Promise<string | null
   } catch {
     return null
   }
+}
+
+/** The focused file's lines, kept while its size and mtime hold: every redraw would read and split it again. */
+let shownFile: { path: string; size: number; mtimeMs: number; lines: string[] } | null = null
+
+async function fileLines($: EngineInterface, path: string): Promise<string[] | null> {
+  const stat = await $.fs.stat(path).catch(() => null)
+  const at = shownFile
+  if (stat && at && at.path === path && at.size === stat.size && at.mtimeMs === stat.mtimeMs) return at.lines
+  const text = await readText($, path)
+  const lines = text === null ? null : splitLines(text).map(clean)
+  shownFile = stat && lines ? { path, size: stat.size, mtimeMs: stat.mtimeMs, lines } : null
+  return lines
 }
 
 function sourceView(path: string, lines: string[], from: number, to: number, pad: number, limit: number): FileView {
@@ -323,11 +349,24 @@ async function readPlan($: EngineInterface, path: string, from: number, to: numb
   }
 }
 
-async function writePlan($: EngineInterface, path: string, label: string): Promise<Plan> {
-  const before = await readText($, path)
+/**
+ * What an Edit or Write result says beyond its text: the file as the tool found
+ * it (truer than a snapshot taken before the permission prompt), and whether
+ * the change was held for review rather than written.
+ */
+function toolRecord(ran: ToolCallResult): { originalFile?: string | null; staged?: boolean } {
+  const result = ran.isError || ran.deny !== undefined ? null : ran.result
+  return typeof result === 'object' && result !== null ? (result as { originalFile?: string | null; staged?: boolean }) : {}
+}
+
+async function writePlan($: EngineInterface, path: string, label: string, isTool = false): Promise<Plan> {
+  const snapshot = await readText($, path)
   return {
     activity: { ...base('write', label, path), line: 1 },
-    after: async () => {
+    after: async ran => {
+      const record = isTool ? toolRecord(ran) : {}
+      if (record.staged === true) return { isHeld: true }
+      const before = typeof record.originalFile === 'string' ? record.originalFile : snapshot
       const after = await readText($, path)
       if (after === null) return {}
       if (before === null) {
@@ -340,15 +379,15 @@ async function writePlan($: EngineInterface, path: string, label: string): Promi
   }
 }
 
-async function plan($: EngineInterface, e: ToolCallInput): Promise<Plan> {
+async function plan($: EngineInterface, e: ToolCallInput, here: string): Promise<Plan> {
   const tool = String(e.tool)
   if (e.tool === 'Read') {
-    const path = absolute(e.file_path)
+    const path = absolute(e.file_path, here)
     const from = Math.max(1, e.offset ?? 1)
     return readPlan($, path, from, e.limit ? from + e.limit - 1 : null, e.file_path)
   }
   if (e.tool === 'Edit') {
-    const path = absolute(e.file_path)
+    const path = absolute(e.file_path, here)
     const before = await readText($, path)
     const at = before === null ? -1 : before.indexOf(e.old_string)
     const line = at < 0 || before === null ? null : lineOf(before, at)
@@ -361,18 +400,22 @@ async function plan($: EngineInterface, e: ToolCallInput): Promise<Plan> {
         view: before === null || line === null || endLine === null ? null : sourceView(path, splitLines(before), line, endLine, EDIT_CONTEXT, READ_WINDOW),
       },
       after: async ran => {
-        const after = ran.isError || ran.deny !== undefined || before === null ? null : await readText($, path)
-        const view = after === null || before === null ? null : diffView(path, before, after)
+        const record = toolRecord(ran)
+        if (record.staged === true) return { isHeld: true }
+        const from = typeof record.originalFile === 'string' ? record.originalFile : before
+        const after = ran.isError || ran.deny !== undefined || from === null ? null : await readText($, path)
+        const view = after === null || from === null ? null : diffView(path, from, after)
         return view?.mode === 'diff' ? diffFields(view) : {}
       },
     }
   }
-  if (e.tool === 'Write') return writePlan($, absolute(e.file_path), e.file_path)
-  if (e.tool === 'NotebookEdit') return { activity: base('edit', e.notebook_path, absolute(e.notebook_path)) }
+  if (e.tool === 'Write') return writePlan($, absolute(e.file_path, here), e.file_path, true)
+  if (e.tool === 'NotebookEdit') return { activity: base('edit', e.notebook_path, absolute(e.notebook_path, here)) }
   if (e.tool === 'Bash') {
     const found = parseShell(e.command)
-    if (found?.kind === 'read') return readPlan($, absolute(found.path), found.from ?? 1, found.to ?? null, e.command)
-    if (found?.kind === 'write') return writePlan($, absolute(found.path), e.command)
+    const path = found && absolute(found.path, found.dir === undefined ? here : absolute(found.dir, here))
+    if (found?.kind === 'read' && path) return readPlan($, path, found.from ?? 1, found.to ?? null, e.command)
+    if (found?.kind === 'write' && path) return writePlan($, path, e.command)
     return { activity: base('shell', e.command) }
   }
   if (tool === 'Grep' || tool === 'Glob') {
@@ -390,11 +433,13 @@ async function plan($: EngineInterface, e: ToolCallInput): Promise<Plan> {
   return { activity: base('other', tool.replace(/^mcp__/, '').replace(/__/g, ' › ')) }
 }
 
-/** Newest first; only the newest few (and the pinned one) keep their excerpt. */
-function trim(list: Activity[], keep: string | null): Activity[] {
-  return list
-    .slice(0, MAX_ACTIVITIES)
-    .map((a, i) => (i < MAX_VIEWS || a.id === keep || a.view === null ? a : { ...a, view: null }))
+/** Newest first; only the newest few keep their excerpt. The pinned one stays, excerpt and all. */
+export function trim(list: Activity[], keep: string | null): Activity[] {
+  const kept = list.slice(0, MAX_ACTIVITIES)
+  const held = keep === null || kept.some(a => a.id === keep) ? undefined : list.find(a => a.id === keep)
+  return [...kept, ...(held ? [held] : [])].map((a, i) =>
+    i < MAX_VIEWS || a.id === keep || a.view === null ? a : { ...a, view: null },
+  )
 }
 
 export type DiffRow = { t: ' ' | '-' | '+'; text: string; old: number; new: number; hunk: number }
@@ -515,6 +560,13 @@ function ago(ms: number) {
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h`
 }
 
+async function reset($: EngineInterface) {
+  await update($, activities, () => [])
+  await update($, pinned, () => null)
+  await update($, scroll, () => null)
+  $.ui.status(undefined)
+}
+
 const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: 'Follow', columns: SIDEBAR_COLUMNS, rows: 30 })
 
 const clip = (text: string, room: number) =>
@@ -526,7 +578,7 @@ export const register: Register = (on, options) => {
   themeBackground = null
 
   on('session.start', async ($, e, next) => {
-    cwd = await $.session.cwd()
+    root = await $.session.root().catch(() => $.session.cwd())
     await $.command.register({
       name: 'follow',
       description: 'Follow the agent: open the live file pane, or `live`, `clear`',
@@ -538,11 +590,22 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A /clear starts a new conversation with no session.start: its trail goes too.
+  on('session.end', { reason: 'clear' }, async ($, e, next) => {
+    await reset($)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // The status line names what the agent is doing; once the turn ends it is doing nothing.
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) $.ui.status(undefined)
+    return next(e)
+  })
+
   on('command.run', { command: 'follow' }, async ($, e) => {
     const verb = e.args.trim()
     if (verb === 'clear') {
-      await update($, activities, () => [])
-      await update($, pinned, () => null)
+      await reset($)
       return { text: 'Follow trail cleared.' }
     }
     if (verb === 'live') {
@@ -565,7 +628,11 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     let p: Plan
     try {
-      p = await plan($, e)
+      // The calling loop's directory: a subagent's own, a worktree's after a move.
+      const here = await $.session.cwd()
+      // /cd and a worktree move take the root along.
+      if (e.agentId === undefined) root = await $.session.root().catch(() => root || here)
+      p = await plan($, e, here)
     } catch {
       return next(e)
     }
@@ -582,12 +649,20 @@ export const register: Register = (on, options) => {
     if (keep === null) void mirror($, activity)
     if (activity.kind !== 'other') $.ui.status(`◉ ${BADGE[activity.kind].label.toLowerCase()} ${clip(shortPath(activity), 48)}`)
 
-    const ran = await next(e)
+    const settle = (extra: Partial<Activity>, phase: Activity['phase']) =>
+      update($, activities, list => list.map((a): Activity => (a.id === activity.id ? { ...a, ...extra, phase } : a)))
+
+    let ran: ToolCallResult
+    try {
+      ran = await next(e)
+    } catch (error) {
+      // Interrupted or thrown: the row would otherwise read `…` for good.
+      await settle({}, 'error').catch(() => {})
+      throw error
+    }
     const isError = ran.deny !== undefined || ran.isError === true
     const extra = p.after && !isError ? await p.after(ran).catch(() => ({})) : {}
-    await update($, activities, list =>
-      list.map((a): Activity => (a.id === activity.id ? { ...a, ...extra, phase: isError ? 'error' : 'done' } : a)),
-    )
+    await settle(extra, isError ? 'error' : 'done')
 
     return ran
   }).catch(($, e, next) => next(e))
@@ -596,8 +671,8 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button, Code } = $.ui.resolve(e)
     const list = await read($, activities)
     const stored = await read($, pinned)
-    // Only an activity id pins; anything else left in the state is dropped.
-    const pin = typeof stored === 'string' ? stored : null
+    // Only an activity id still in the trail pins; anything else follows live.
+    const pin = typeof stored === 'string' && list.some(a => a.id === stored) ? stored : null
     const scrolled = await read($, scroll)
     const t = await $.clock.now()
     const width = Math.max(24, e.props.bodyColumns)
@@ -607,7 +682,7 @@ export const register: Register = (on, options) => {
     // While the agent in view waits on a subagent, the subagent is where the work is.
     const isDelegating = mine[0]?.kind === 'agent' && mine[0].phase === 'running'
     const pool = mine.length > 0 && !isDelegating ? mine : list
-    const pinnedOne = pin === null ? undefined : list.find(a => a.id === pin)
+    const pinnedOne = list.find(a => a.id === pin)
     const focus = pinnedOne ?? pool.find(a => a.view !== null) ?? pool.find(a => a.path !== null)
     const now = pool[0]
 
@@ -639,7 +714,7 @@ export const register: Register = (on, options) => {
       )
     const statWidth = (added: number | null, removed: number | null) =>
       added == null || removed == null ? 0 : `${added}${removed}`.length + 7
-    const mark = (a: Activity) => (a.phase === 'running' ? '…' : a.phase === 'error' ? '✗' : '')
+    const mark = (a: Activity) => (a.phase === 'running' ? '…' : a.phase === 'error' ? '✗' : a.isHeld ? 'held' : '')
 
     if (list.length === 0) {
       drawn = null
@@ -676,10 +751,10 @@ export const register: Register = (on, options) => {
       )
       place = (from, to) => `diff rows ${from}–${to} of ${diff.length}${view.isCut ? ' (cut)' : ''}`
     } else if (focus?.path) {
-      const text = await readText($, focus.path)
+      const whole = await fileLines($, focus.path)
       const view = focus.view?.mode === 'source' ? focus.view : null
-      const lines = text !== null ? splitLines(text).map(clean) : view?.lines ?? []
-      const first = text !== null ? 1 : view?.startLine ?? 1
+      const lines = whole ?? view?.lines ?? []
+      const first = whole !== null ? 1 : view?.startLine ?? 1
       const focusFrom = focus.line ?? view?.focusFrom ?? first
       const focusTo = Math.max(focusFrom, focus.endLine ?? view?.focusTo ?? focusFrom)
       codeTotal = lines.length
@@ -792,11 +867,13 @@ export const register: Register = (on, options) => {
                   <Text wrap="truncate-start" bold> {shortPath(focus)}</Text>
                 </Box>
                 {stat(focus.added, focus.removed)}
-                <Text dimColor> {focus.phase === 'running' ? '…' : focus.phase === 'error' ? '✗' : ago(t - focus.at)}</Text>
+                <Text dimColor> {mark(focus) || ago(t - focus.at)}</Text>
               </Box>
               <Box flexDirection="row" height={1}>
                 <Box flexGrow={1} flexShrink={1}>
-                  <Text dimColor wrap="truncate-end">{focus.tool === 'Bash' ? `$ ${oneLine(focus.label)}` : where}</Text>
+                  <Text dimColor wrap="truncate-end">
+                    {focus.isHeld ? 'held for review: the file is unchanged' : focus.tool === 'Bash' ? `$ ${oneLine(focus.label)}` : where}
+                  </Text>
                 </Box>
                 {maxTop > 0 ? <Text dimColor> {Math.round((top / maxTop) * 100)}%</Text> : ''}
               </Box>

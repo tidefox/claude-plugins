@@ -105,3 +105,93 @@ test('follows a read, an edit and a scratchpad write into the pane', async ($, o
     await ui.unmount()
   }
 })
+
+test('follows a cd, trusts the tool over its snapshot, and starts over on /clear', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-20T10:00:00Z') })
+  const DEEP = '/work/app/src/deep/util.ts'
+  const files = new Map<string, string>([
+    [FILE, 'a\nb\nc\n'],
+    [DEEP, Array.from({ length: 10 }, (_, i) => `export const u${i + 1} = ${i + 1}`).join('\n') + '\n'],
+  ])
+  const statuses: (string | undefined)[] = []
+
+  on('fs.read', (_, e) => {
+    const text = files.get((e as { path: string }).path)
+    if (text === undefined) throw new Error('ENOENT')
+    return { value: text } as never
+  })
+  on('session.cwd', () => ({ value: '/work/app' }) as never)
+  on('session.root', () => ({ value: '/work/app' }) as never)
+  on('command.register', () => ({ value: undefined }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.status', (_, e) => {
+    statuses.push((e as { text?: string }).text)
+    return { value: undefined } as never
+  })
+  on('turn.complete', () => ({ text: 'done' }) as never)
+  on('session.end', () => ({ sessionId: 's1' }) as never)
+  on('tool.call', (_, e) => {
+    if (e.tool === 'Edit' && e.new_string === 'HELD') return { result: { staged: true } as never, text: 'held' }
+    if (e.tool === 'Edit') {
+      // Someone else changed the file while the permission prompt was up: the tool saw `B`.
+      const seen = files.get(e.file_path)!.replace('b', 'B')
+      files.set(e.file_path, seen.replace(e.old_string, e.new_string))
+      return { result: { originalFile: seen } as never, text: 'ok' }
+    }
+    if (e.tool === 'Bash' && e.command === 'sleep 99') throw new Error('interrupted')
+    return { result: {} as never, text: 'ok' }
+  })
+
+  const mount = (surface: 'terminal' | 'desktop') =>
+    $.ui.mount({ plugin: 'follow', surface, component: 'Pane', requestId: 'follow', props: props() })
+
+  await $.tool.call({ tool: 'Bash', command: 'cd src/deep && sed -n 4,6p util.ts' })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mount(surface)
+    await ui.drawn()
+    expect(await ui.find({ type: 'Text', text: /deep\/util\.ts:4-6/ })).toBeDefined()
+    expect(String((await ui.find({ type: 'Code' }))?.props.source)).toContain('export const u4 = 4')
+    await ui.unmount()
+  }
+
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'c', new_string: 'C' })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mount(surface)
+    await ui.drawn()
+    const source = String((await ui.find({ type: 'Code' }))?.props.source)
+    expect(source).toContain('-c')
+    // The diff is against what the tool saw, so the other change is no part of it.
+    expect(source).not.toContain('-b')
+    await ui.unmount()
+  }
+
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'a', new_string: 'HELD' })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mount(surface)
+    await ui.drawn()
+    expect(await ui.find({ type: 'Text', text: /held for review/ })).toBeDefined()
+    await ui.unmount()
+  }
+
+  await $.tool.call({ tool: 'Bash', command: 'sleep 99' }).catch(() => {})
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mount(surface)
+    await ui.drawn()
+    expect(await ui.find({ type: 'Text', text: /✗/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ …$/ })).toBeUndefined()
+    await ui.unmount()
+  }
+
+  expect(statuses.some(text => /◉ edit/.test(text ?? ''))).toBe(true)
+  const shown = statuses.length
+  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', category: null, explanation: null } as never)
+  expect(statuses.length).toBeGreaterThan(shown)
+  expect(statuses[statuses.length - 1]).toBeUndefined()
+
+  await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } } as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await mount(surface)
+    expect(await ui.find({ type: 'Text', text: /Nothing yet/ })).toBeDefined()
+    await ui.unmount()
+  }
+})

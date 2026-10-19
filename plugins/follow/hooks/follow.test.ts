@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
-import { autoTop, buildHunk, codeLayout, diffRows, isScratchPath, lineOf, oneLine, parseShell, splitLines, thumb, windowDiff } from './register'
+import type { Activity } from '../types'
+import { autoTop, buildHunk, codeLayout, diffRows, isScratchPath, lineOf, oneLine, parseShell, splitLines, thumb, trim, windowDiff } from './register'
 
 test('finds the line an edit lands on', async () => {
   const text = 'a\nb\nc\nneedle\ne\n'
@@ -57,7 +58,7 @@ test('reads file access out of shell commands', async () => {
   expect(parseShell("sed -n '40,80p' src/app.ts")).toEqual({ kind: 'read', path: 'src/app.ts', from: 40, to: 80 })
   expect(parseShell('cat README.md')).toEqual({ kind: 'read', path: 'README.md' })
   expect(parseShell('head -n 20 a.txt')).toEqual({ kind: 'read', path: 'a.txt', from: 1, to: 20 })
-  expect(parseShell('cd /x && cat "my file.md" | grep foo')).toEqual({ kind: 'read', path: 'my file.md' })
+  expect(parseShell('cd /x && cat "my file.md" | grep foo')).toEqual({ kind: 'read', path: 'my file.md', dir: '/x' })
   expect(parseShell("cat > /tmp/notes.md <<'EOF'\nhi\nEOF")).toEqual({ kind: 'write', path: '/tmp/notes.md' })
   expect(parseShell('echo hi | tee -a log.txt')).toEqual({ kind: 'write', path: 'log.txt' })
   expect(parseShell('npm test 2>/dev/null')).toBe(null)
@@ -71,6 +72,30 @@ test('reads file access out of shell commands', async () => {
   expect(parseShell(`git commit -qam "fix: thing\n\nCo-Authored-By: Claude <noreply@anthropic.com>"`)).toBe(null)
   expect(parseShell("git commit -F - <<'EOF'\nfix\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF")).toBe(null)
   expect(parseShell("cat <<'EOF' > out.md\nhi > there\nEOF")).toEqual({ kind: 'write', path: 'out.md' })
+})
+
+test('reads a relative path against a leading cd', async () => {
+  expect(parseShell('cd /repo/types && sed -n 10,20p api.d.ts')).toEqual({ kind: 'read', path: 'api.d.ts', from: 10, to: 20, dir: '/repo/types' })
+  expect(parseShell('cd sub; echo hi > out.txt')).toEqual({ kind: 'write', path: 'out.txt', dir: 'sub' })
+  expect(parseShell('cd "my dir" && cat a.md')).toEqual({ kind: 'read', path: 'a.md', dir: 'my dir' })
+  // After a cd that cannot be followed, a relative path is somewhere unknown; an absolute one is not.
+  expect(parseShell('cd $HOME && cat a.md')).toBe(null)
+  expect(parseShell('cd ~/src && cat a.md')).toBe(null)
+  expect(parseShell('cd - && cat a.md')).toBe(null)
+  expect(parseShell('ls && cd /x && cat a.md')).toBe(null)
+  expect(parseShell('cd /x && cd y && cat a.md')).toBe(null)
+  expect(parseShell('cd $HOME && cat /etc/hosts')).toEqual({ kind: 'read', path: '/etc/hosts' })
+})
+
+test('keeps the pinned activity when the trail outgrows it', async () => {
+  const row = (i: number): Activity => ({
+    id: `t${i}`, agentId: null, tool: 'Read', kind: 'read', isScratch: false, path: `/f${i}`, line: 1, endLine: 1,
+    label: `f${i}`, added: null, removed: null, phase: 'done', at: i, view: null,
+  })
+  const list = Array.from({ length: 81 }, (_, i) => row(i))
+  expect(trim(list, null).map(a => a.id)).not.toContain('t80')
+  expect(trim(list, 't80').map(a => a.id)).toContain('t80')
+  expect(trim(list, 't80')).toHaveLength(81)
 })
 
 test('knows a scratchpad path', async () => {
