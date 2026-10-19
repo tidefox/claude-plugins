@@ -65,6 +65,8 @@ test('follows a read, an edit and a scratchpad write into the pane', async ($, o
     expect(code?.props.format).toBe('diff')
     expect(String(code?.props.source)).toContain('@@ -17,7 +17,8 @@')
     expect(String(code?.props.source)).toContain('+const extra = 1')
+    expect(await ui.find({ type: 'Text', text: '+2' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '−1' })).toBeDefined()
     await ui.unmount()
   }
 

@@ -11,7 +11,7 @@ export type SourceView = {
 }
 
 /** One unified-diff hunk (header included) of what an edit or write changed. */
-export type DiffView = { mode: 'diff'; path: string; hunk: string; line: number; isCut: boolean }
+export type DiffView = { mode: 'diff'; path: string; hunk: string; line: number; isCut: boolean; added: number; removed: number }
 
 export type FileView = SourceView | DiffView
 
@@ -29,6 +29,9 @@ export type Activity = {
   endLine: number | null
   /** One line saying what it does: a command, a pattern, a URL. */
   label: string
+  /** Lines an edit or write added and removed, whole (not cut to what the hunk shows). */
+  added: number | null
+  removed: number | null
   phase: 'running' | 'done' | 'error'
   at: number
   view: FileView | null

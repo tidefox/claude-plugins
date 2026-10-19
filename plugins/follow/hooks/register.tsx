@@ -14,7 +14,7 @@ const MAX_VIEWS = 12
 const READ_WINDOW = 120
 const EDIT_CONTEXT = 12
 const HUNK_CONTEXT = 3
-const HUNK_CAP = 60
+const HUNK_CAP = 80
 const MAX_FILE_CHARS = 4_000_000
 const TRAIL_ROWS = 6
 const FILE_ROWS = 5
@@ -52,17 +52,52 @@ export function lineOf(text: string, index: number): number {
 
 export const isScratchPath = (path: string) => /\/scratchpad(\/|$)/.test(path) || /^\/tmp\/claude-/.test(path)
 
+type Op = { t: ' ' | '-' | '+'; line: string }
+
+/** Past this many cells the middle is diffed as one block, not aligned line by line. */
+const MAX_DIFF_CELLS = 4_000_000
+
+/** A line-by-line alignment (LCS) of `a` and `b`: each change's removals before its additions. */
+function align(a: string[], b: string[]): Op[] {
+  const n = a.length
+  const m = b.length
+  if (n * m > MAX_DIFF_CELLS) return [...a.map(line => ({ t: '-' as const, line })), ...b.map(line => ({ t: '+' as const, line }))]
+  // lcs[i * (m + 1) + j]: the longest common run of a[i..] and b[j..].
+  const lcs = new Uint32Array((n + 1) * (m + 1))
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i * (m + 1) + j] =
+        a[i] === b[j] ? lcs[(i + 1) * (m + 1) + j + 1]! + 1 : Math.max(lcs[(i + 1) * (m + 1) + j]!, lcs[i * (m + 1) + j + 1]!)
+    }
+  }
+  const ops: Op[] = []
+  let i = 0
+  let j = 0
+  while (i < n || j < m) {
+    if (i < n && j < m && a[i] === b[j]) {
+      ops.push({ t: ' ', line: a[i++]! })
+      j++
+    } else if (j >= m || (i < n && lcs[(i + 1) * (m + 1) + j]! >= lcs[i * (m + 1) + j + 1]!)) {
+      ops.push({ t: '-', line: a[i++]! })
+    } else {
+      ops.push({ t: '+', line: b[j++]! })
+    }
+  }
+  return ops
+}
+
 /**
- * One unified-diff hunk covering every line that differs between `before` and
- * `after` (common head and tail trimmed), with a little context. Each side of the
- * change is cut at `cap` lines, the header counting exactly what is drawn.
+ * Unified-diff hunks of what differs between `before` and `after`, lines aligned
+ * as `git diff` does, with `context` unchanged lines around each change; hunks
+ * whose context would meet are merged. At most `cap` body lines are drawn, each
+ * header counting exactly the lines under it.
  */
 export function buildHunk(
   before: string[],
   after: string[],
   context = HUNK_CONTEXT,
   cap = HUNK_CAP,
-): { hunk: string; line: number; isCut: boolean } | null {
+): { hunk: string; line: number; isCut: boolean; added: number; removed: number } | null {
   let head = 0
   while (head < before.length && head < after.length && before[head] === after[head]) head++
   let tail = 0
@@ -73,31 +108,78 @@ export function buildHunk(
   ) {
     tail++
   }
-  const removed = before.slice(head, before.length - tail)
-  const added = after.slice(head, after.length - tail)
-  if (removed.length === 0 && added.length === 0) return null
+  if (head === before.length && head === after.length) return null
 
-  const isCut = removed.length > cap || added.length > cap
-  const shownRemoved = removed.slice(0, cap)
-  const shownAdded = added.slice(0, cap)
   const lead = before.slice(Math.max(0, head - context), head)
-  const trail = isCut ? [] : before.slice(before.length - tail, before.length - tail + context)
-
-  const start = head - lead.length + 1
-  const oldCount = lead.length + shownRemoved.length + trail.length
-  const newCount = lead.length + shownAdded.length + trail.length
-  const range = (count: number) => `${count === 0 ? start - 1 : start},${count}`
-  const body = [
-    ...lead.map(l => ` ${l}`),
-    ...shownRemoved.map(l => `-${l}`),
-    ...shownAdded.map(l => `+${l}`),
-    ...trail.map(l => ` ${l}`),
+  const ops: Op[] = [
+    ...lead.map(line => ({ t: ' ' as const, line })),
+    ...align(before.slice(head, before.length - tail), after.slice(head, after.length - tail)),
+    ...before.slice(before.length - tail, before.length - tail + context).map(line => ({ t: ' ' as const, line })),
   ]
+  const added = ops.filter(o => o.t === '+').length
+  const removed = ops.filter(o => o.t === '-').length
 
-  return { hunk: [`@@ -${range(oldCount)} +${range(newCount)} @@`, ...body].join('\n'), line: head + 1, isCut }
+  // Each op's line number on either side.
+  const first = head - lead.length + 1
+  const at: { old: number; new: number }[] = []
+  let oldNo = first
+  let newNo = first
+  for (const o of ops) {
+    at.push({ old: oldNo, new: newNo })
+    if (o.t !== '+') oldNo++
+    if (o.t !== '-') newNo++
+  }
+
+  // Spans of ops to draw: each change with its context, merged where they meet.
+  const spans: [number, number][] = []
+  ops.forEach((o, k) => {
+    if (o.t === ' ') return
+    const from = Math.max(0, k - context)
+    const to = Math.min(ops.length, k + context + 1)
+    const last = spans[spans.length - 1]
+    if (last && from <= last[1]) last[1] = Math.max(last[1], to)
+    else spans.push([from, to])
+  })
+
+  const hunks: string[] = []
+  let room = cap
+  let isCut = false
+  for (const [from, full] of spans) {
+    if (room <= 0) {
+      isCut = true
+      break
+    }
+    const to = Math.min(full, from + room)
+    if (to < full) isCut = true
+    const body = ops.slice(from, to)
+    room -= body.length
+    const oldCount = body.filter(o => o.t !== '+').length
+    const newCount = body.filter(o => o.t !== '-').length
+    const start = at[from]!
+    // An empty side names the line before it, as diff does.
+    const range = (line: number, count: number) => `${count === 0 ? line - 1 : line},${count}`
+    hunks.push(
+      [`@@ -${range(start.old, oldCount)} +${range(start.new, newCount)} @@`, ...body.map(o => `${o.t}${o.line}`)].join('\n'),
+    )
+  }
+
+  const firstChange = ops.findIndex(o => o.t !== ' ')
+  return { hunk: hunks.join('\n'), line: at[firstChange]!.new, isCut, added, removed }
 }
 
 const unquote = (s: string) => s.replace(/^(['"])(.*)\1$/, '$2')
+
+/**
+ * The command with heredoc bodies dropped and each quoted string swapped for a
+ * placeholder, so a `>` or `|` inside a message or a pattern is not read as shell.
+ */
+function mask(command: string): { masked: string; restore: (s: string) => string } {
+  const quoted: string[] = []
+  const masked = command
+    .replace(/<<-?\s*(['"]?)(\w+)\1([^\n]*)\n[\s\S]*?\n\s*\2(?=\s|\)|$)/g, '$3')
+    .replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, q => `\u0001${quoted.push(q) - 1}\u0001`)
+  return { masked, restore: s => unquote(s.replace(/\u0001(\d+)\u0001/g, (_, k: string) => quoted[Number(k)] ?? '')) }
+}
 
 /**
  * What a shell command does to a file, for the common read and write spellings
@@ -108,27 +190,36 @@ export function parseShell(
 ): { kind: 'read' | 'write'; path: string; from?: number; to?: number } | null {
   const found = matchShell(command)
   // A path held in a shell variable cannot be followed.
-  return found && !/[$`*?]/.test(found.path) ? found : null
+  return found && found.path !== '' && !/[$`*?\u0001]/.test(found.path) ? found : null
 }
 
 function matchShell(command: string): { kind: 'read' | 'write'; path: string; from?: number; to?: number } | null {
-  const redirect = /(?:^|[^0-9&<>=-])>>?\s*('[^']+'|"[^"]+"|[^\s'"&|;<>()]+)/.exec(command)
-  if (redirect?.[1] && !/^\/dev\//.test(unquote(redirect[1]))) return { kind: 'write', path: unquote(redirect[1]) }
-  const tee = /\btee\s+(?:-a\s+)?('[^']+'|"[^"]+"|[^\s'"&|;<>()]+)/.exec(command)
-  if (tee?.[1]) return { kind: 'write', path: unquote(tee[1]) }
+  const { masked, restore } = mask(command)
+  // A file operand: never an option, never a redirect.
+  const file = `([^\\s<>|;&()-][^\\s<>|;&()]*)`
 
-  for (const raw of command.split(/\s*(?:&&|\|\||;|\||\n)\s*/)) {
-    const seg = raw.trim().replace(/^(?:cd\s+\S+\s*)?/, '')
-    const file = `('[^']+'|"[^"]+"|[^\\s'"<>|;&]+)`
-    const sed = new RegExp(`^sed\\s+-n\\s+['"]?(\\d+)(?:,(\\d+))?p['"]?\\s+${file}$`).exec(seg)
+  const redirect = new RegExp(`(?:^|[^0-9&<>=-])>>?\\s*${file}`).exec(masked)
+  if (redirect?.[1] && !/^\/dev\//.test(restore(redirect[1]))) return { kind: 'write', path: restore(redirect[1]) }
+  const tee = new RegExp(`\\btee\\s+(?:-a\\s+)?${file}`).exec(masked)
+  if (tee?.[1]) return { kind: 'write', path: restore(tee[1]) }
+
+  for (const raw of masked.split(/\s*(?:&&|\|\||;|\||\n)\s*/)) {
+    const seg = raw.trim().replace(/^cd\s+\S+\s*$/, '')
+    const sed = new RegExp(`^sed\\s+-n\\s+\\u0001?(\\d+)(?:,(\\d+))?p\\u0001?\\s+${file}$`).exec(
+      seg.replace(/\u0001(\d+)\u0001/g, (q, k: string) => {
+        const text = restore(q)
+        return /^\d+(,\d+)?p$/.test(text) ? `\u0001${text}\u0001` : `\u0001${k}\u0001`
+      }),
+    )
     if (sed?.[1] && sed[3]) {
       const from = Number(sed[1])
-      return { kind: 'read', path: unquote(sed[3]), from, to: sed[2] ? Number(sed[2]) : from }
+      return { kind: 'read', path: restore(sed[3]), from, to: sed[2] ? Number(sed[2]) : from }
     }
-    const head = new RegExp(`^head(?:\\s+-n)?(?:\\s+-?(\\d+))?\\s+${file}$`).exec(seg)
-    if (head?.[2]) return { kind: 'read', path: unquote(head[2]), from: 1, to: Number(head[1] ?? 10) }
+    const headCmd = new RegExp(`^head(?:\\s+-n)?(?:\\s+-?(\\d+))?\\s+${file}$`).exec(seg)
+    if (headCmd?.[2]) return { kind: 'read', path: restore(headCmd[2]), from: 1, to: Number(headCmd[1] ?? 10) }
     const cat = new RegExp(`^(?:cat|bat|batcat|nl|tail|less|more)(?:\\s+-[\\w-]+(?:\\s+\\d+)?)*\\s+${file}$`).exec(seg)
-    if (cat?.[1] && !cat[1].startsWith('-')) return { kind: 'read', path: unquote(cat[1]) }
+    // `tail -n 20` with no file: the count is no file.
+    if (cat?.[1] && !/^\d+$/.test(cat[1])) return { kind: 'read', path: restore(cat[1]) }
   }
 
   return null
@@ -180,6 +271,13 @@ function diffView(path: string, before: string, after: string): FileView | null 
   return hunk && { mode: 'diff', path, ...hunk }
 }
 
+const diffFields = (view: FileView & { mode: 'diff' }): Partial<Activity> => ({
+  line: view.line,
+  view,
+  added: view.added,
+  removed: view.removed,
+})
+
 type Plan = {
   activity: Omit<Activity, 'id' | 'agentId' | 'tool' | 'phase' | 'at'>
   /** Runs after the tool answered; what it returns is merged into the activity. */
@@ -194,6 +292,8 @@ const base = (kind: ActivityKind, label: string, path: string | null = null) => 
   line: null,
   endLine: null,
   view: null,
+  added: null,
+  removed: null,
 })
 
 async function readPlan($: EngineInterface, path: string, from: number, to: number | null, label: string): Promise<Plan> {
@@ -219,10 +319,10 @@ async function writePlan($: EngineInterface, path: string, label: string): Promi
       if (after === null) return {}
       if (before === null) {
         const lines = splitLines(after)
-        return { label: `${label} (new file)`, endLine: lines.length, view: sourceView(path, lines, 1, 0, 0, READ_WINDOW) }
+        return { label: `${label} (new file)`, endLine: lines.length, added: lines.length, removed: 0, view: sourceView(path, lines, 1, 0, 0, READ_WINDOW) }
       }
       const view = diffView(path, before, after)
-      return view?.mode === 'diff' ? { line: view.line, view } : {}
+      return view?.mode === 'diff' ? diffFields(view) : {}
     },
   }
 }
@@ -250,7 +350,7 @@ async function plan($: EngineInterface, e: ToolCallInput): Promise<Plan> {
       after: async ran => {
         const after = ran.isError || ran.deny !== undefined || before === null ? null : await readText($, path)
         const view = after === null || before === null ? null : diffView(path, before, after)
-        return view?.mode === 'diff' ? { line: view.line, view } : {}
+        return view?.mode === 'diff' ? diffFields(view) : {}
       },
     }
   }
@@ -414,6 +514,17 @@ export const register: Register = (on, options) => {
         {a.isScratch ? <Text bold color="inverseText" backgroundColor="remember">{' SCRATCH '}</Text> : ''}
       </Text>
     )
+    const stat = (added: number | null, removed: number | null) =>
+      added == null || removed == null ? (
+        ''
+      ) : (
+        <Text>
+          {' '}
+          <Text color="success">+{added}</Text> <Text color="error">−{removed}</Text>
+        </Text>
+      )
+    const statWidth = (added: number | null, removed: number | null) =>
+      added == null || removed == null ? 0 : `${added}${removed}`.length + 4
     const mark = (a: Activity) => (a.phase === 'running' ? '…' : a.phase === 'error' ? '✗' : '')
 
     if (list.length === 0) {
@@ -459,16 +570,21 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const files: { path: string; letters: Set<string>; latest: Activity }[] = []
+    const files: { path: string; letters: Set<string>; latest: Activity; added: number | null; removed: number | null }[] = []
     for (const a of pool) {
       if (a.path === null) continue
       let f = files.find(x => x.path === a.path)
       if (!f) {
-        f = { path: a.path, letters: new Set(), latest: a }
+        f = { path: a.path, letters: new Set(), latest: a, added: null, removed: null }
         files.push(f)
       }
       const letter = LETTER[a.kind]
       if (letter) f.letters.add(letter)
+      // Rows kept from before counts were recorded have none.
+      if (a.added != null && a.removed != null) {
+        f.added = (f.added ?? 0) + a.added
+        f.removed = (f.removed ?? 0) + a.removed
+      }
     }
 
     return (
@@ -502,6 +618,7 @@ export const register: Register = (on, options) => {
               <Box flexGrow={1} flexShrink={1}>
                 <Text wrap="truncate-start" bold> {shortPath(focus)}</Text>
               </Box>
+              {stat(focus.added, focus.removed)}
               <Text dimColor> {focus.phase === 'running' ? '…' : focus.phase === 'error' ? '✗' : ago(t - focus.at)}</Text>
             </Box>
             {focus.tool === 'Bash' ? <Text dimColor wrap="truncate-end">$ {focus.label}</Text> : ''}
@@ -519,8 +636,9 @@ export const register: Register = (on, options) => {
             {files.slice(0, FILE_ROWS).map(f => (
               <Button key={`file:${f.path}`} plain onPress={() => update($, pinned, () => f.latest.id)}>
                 <Text color="warning">{(['R', 'E', 'W'].map(l => (f.letters.has(l) ? l : '·')).join('')).padEnd(3)}</Text>{' '}
-                {clip(relative(f.path), inner - 6)}
+                {clip(relative(f.path), inner - 6 - statWidth(f.added, f.removed))}
                 {isScratchPath(f.path) ? <Text color="remember"> ✎</Text> : ''}
+                {stat(f.added, f.removed)}
               </Button>
             ))}
           </Box>
@@ -532,7 +650,8 @@ export const register: Register = (on, options) => {
             <Button key={`trail:${a.id}`} plain onPress={() => update($, pinned, () => a.id)}>
               <Text color={a.id === focus?.id ? 'claude' : 'subtle'}>{a.id === focus?.id ? '▸' : ' '}</Text>{' '}
               <Text color={BADGE[a.kind].color}>{BADGE[a.kind].label.toLowerCase().padEnd(6)}</Text>{' '}
-              {clip(a.path === null ? a.label : shortPath(a), inner - 16)}{' '}
+              {clip(a.path === null ? a.label : shortPath(a), inner - 16 - statWidth(a.added, a.removed))}
+              {stat(a.added, a.removed)}{' '}
               <Text dimColor>{mark(a) || ago(t - a.at)}</Text>
             </Button>
           ))}
