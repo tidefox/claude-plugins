@@ -912,8 +912,8 @@ export const register: Register = (on, options) => {
       ) : (
         <Text>
           {' '}
-          <Text bold color="success" backgroundColor="diffAddedDimmed">{` +${added} `}</Text>
-          <Text bold color="error" backgroundColor="diffRemovedDimmed">{` −${removed} `}</Text>
+          <Text bold backgroundColor="diffAdded">{` +${added} `}</Text>
+          <Text bold backgroundColor="diffRemoved">{` −${removed} `}</Text>
         </Text>
       )
     const statWidth = (added: number | null, removed: number | null) =>
@@ -998,7 +998,7 @@ export const register: Register = (on, options) => {
               const isFirst = row.part === 0 && !row.isGap
               if (isDiff) {
                 return (
-                  <Text dimColor={row.t === ' '} color={row.t === '+' ? 'success' : row.t === '-' ? 'error' : undefined} backgroundColor={TONE[row.t]}>
+                  <Text dimColor={row.t === ' '} backgroundColor={TONE[row.t]}>
                     {`${num(row.old, isFirst && row.t !== '+')} ${num(row.new, isFirst && row.t !== '-')} ${isFirst ? row.t : ' '} `}
                   </Text>
                 )
@@ -1178,8 +1178,8 @@ export const register: Register = (on, options) => {
                   <Text dimColor> lines read   </Text>
                   <Text color="warning">▌</Text>
                   <Text dimColor> lines changed   </Text>
-                  <Text bold color="success" backgroundColor="diffAddedDimmed">{' +N '}</Text>
-                  <Text bold color="error" backgroundColor="diffRemovedDimmed">{' −M '}</Text>
+                  <Text bold backgroundColor="diffAdded">{' +N '}</Text>
+                  <Text bold backgroundColor="diffRemoved">{' −M '}</Text>
                 </Text>
                 <Text dimColor wrap="wrap">p pin · f follow live · j/k scroll · /follow clear</Text>
               </Box>
