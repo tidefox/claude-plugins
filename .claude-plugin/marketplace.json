@@ -25,7 +25,7 @@
       "name": "follow",
       "source": "./plugins/follow",
       "description": "Follow the agent: a live sidebar showing the file and lines it is reading, editing or writing right now, like Zed's follow mode",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "category": "productivity",
       "keywords": [
         "follow",

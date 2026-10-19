@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Activity } from '../types'
-import { autoTop, buildHunk, codeLayout, diffRows, isScratchPath, lineOf, oneLine, parseShell, splitLines, thumb, trim, windowDiff } from './register'
+import { autoTop, buildHunk, codeLayout, diffRows, isScratchPath, lineOf, namedPaths, oneLine, parseShell, shellDir, splitLines, thumb, trim, windowDiff } from './register'
 
 test('finds the line an edit lands on', async () => {
   const text = 'a\nb\nc\nneedle\ne\n'
@@ -85,6 +85,21 @@ test('reads a relative path against a leading cd', async () => {
   expect(parseShell('ls && cd /x && cat a.md')).toBe(null)
   expect(parseShell('cd /x && cd y && cat a.md')).toBe(null)
   expect(parseShell('cd $HOME && cat /etc/hosts')).toEqual({ kind: 'read', path: '/etc/hosts' })
+})
+
+test('reads several files and a home path', async () => {
+  expect(parseShell('cat hooks/hooks.json types/index.d.ts')).toEqual({ kind: 'read', path: 'hooks/hooks.json' })
+  expect(parseShell('tail -n 20 log.txt')).toEqual({ kind: 'read', path: 'log.txt' })
+  expect(parseShell('cat ~/.claude/settings.json | jq .')).toEqual({ kind: 'read', path: '~/.claude/settings.json' })
+})
+
+test('names the files a script may change', async () => {
+  const script = "cd /repo/hooks && python3 - <<'EOF'\np='register.tsx'\ns=open(p).read()\nif e.tool == 'x': pass\nopen('../README.md','w')\nEOF"
+  expect(shellDir(script)).toBe('/repo/hooks')
+  const paths = namedPaths(script)
+  expect(paths.slice(0, 2)).toEqual(['register.tsx', '../README.md'])
+  expect(namedPaths('curl https://example.com/a.json && sed -i s/a/b/ src/x.ts v1.2.3')).toEqual(['src/x.ts'])
+  expect(namedPaths('git status')).toEqual([])
 })
 
 test('keeps the pinned activity when the trail outgrows it', async () => {

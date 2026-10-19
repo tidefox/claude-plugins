@@ -195,15 +195,43 @@ export function parseShell(command: string): ShellAccess | null {
   const found = matchShell(command)
   // A path held in a shell variable cannot be followed.
   if (!found || found.path === '' || /[$`*?\u0001]/.test(found.path)) return null
-  if (found.path.startsWith('/')) return found
+  if (/^~?\//.test(found.path)) return found
+  const dir = shellDir(command)
+  if (dir === null) return null
+  return dir === undefined ? found : { ...found, dir }
+}
+
+/**
+ * The directory a command's relative paths are read against: a leading `cd
+ * <dir>`, undefined with no cd at all, null when a cd cannot be followed (a
+ * variable, `~`, `-`, or one further on) and a relative path is somewhere unknown.
+ */
+export function shellDir(command: string): string | null | undefined {
   const { masked, restore } = mask(command)
+  const cds = masked.match(/(?:^|[;&|(]\s*)cd\b/g)?.length ?? 0
+  if (cds === 0) return undefined
   const cd = /^\s*cd\s+([^\s;&|<>()]+)\s*(?:&&|;)/.exec(masked)
   const dir = cd?.[1] ? restore(cd[1]) : ''
-  const isFollowed = dir !== '' && dir !== '-' && !/[$`*?~\u0001]/.test(dir)
-  // A relative path after a cd that cannot be followed (a variable, `~`, `-`, a later one) is somewhere unknown.
-  const cds = masked.match(/(?:^|[;&|(]\s*)cd\b/g)?.length ?? 0
-  if (cds === 0) return found
-  return isFollowed && cds === 1 ? { ...found, dir } : null
+  return cds === 1 && dir !== '' && dir !== '-' && !/[$`*?~\u0001]/.test(dir) ? dir : null
+}
+
+/** Path-like words anywhere in a command, heredoc bodies and quoted strings included: what a script may change. */
+export function namedPaths(command: string, limit = 12): string[] {
+  const found = new Set<string>()
+  const text = command.replace(/\b[a-z][\w+.-]*:\/\/\S+/gi, ' ')
+  // A quoted word (`open('notes.md')`) or one with a slash is likelier a file than `e.tool`: those first.
+  const rank = (path: string) => (/['"]$/.test(text.slice(0, text.indexOf(path))) || path.includes('/') ? 0 : 1)
+  const words: string[] = []
+  for (const m of text.matchAll(/(?<![\w$@{}.\/~-])(?:~\/|\.{1,2}\/|\/)?(?:[\w@+-][\w.@+-]*\/)*[\w@+-][\w@+-]*(?:\.[\w-]+)*\.[A-Za-z][\w-]{0,9}(?![\w\/(])/g)) {
+    const path = m[0]
+    if (/^\d|^-|\.(?:com|org|io|net)$/.test(path) || BINARY.test(path)) continue
+    words.push(path)
+  }
+  for (const path of words.sort((a, b) => rank(a) - rank(b))) {
+    found.add(path)
+    if (found.size >= limit) break
+  }
+  return [...found]
 }
 
 function matchShell(command: string): ShellAccess | null {
@@ -232,9 +260,10 @@ function matchShell(command: string): ShellAccess | null {
     }
     const headCmd = new RegExp(`^head(?:\\s+-n)?(?:\\s+-?(\\d+))?\\s+${file}$`).exec(seg)
     if (headCmd?.[2]) return { kind: 'read', path: restore(headCmd[2]), from: 1, to: Number(headCmd[1] ?? 10) }
-    const cat = new RegExp(`^(?:cat|bat|batcat|nl|tail|less|more)(?:\\s+-[\\w-]+(?:\\s+\\d+)?)*\\s+${file}$`).exec(seg)
-    // `tail -n 20` with no file: the count is no file.
-    if (cat?.[1] && !/^\d+$/.test(cat[1])) return { kind: 'read', path: restore(cat[1]) }
+    const cat = new RegExp(`^(?:cat|bat|batcat|nl|tail|less|more)((?:\\s+[^\\s<>|;&()]+)+)$`).exec(seg)
+    // Options and a count (`tail -n 20`) are no file; of several files, the first.
+    const operand = cat?.[1]?.trim().split(/\s+/).find(w => !w.startsWith('-') && !/^\d+$/.test(w))
+    if (operand) return { kind: 'read', path: restore(operand) }
   }
 
   return null
@@ -248,6 +277,9 @@ const clean = (line: string) => line.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
 
 /** The project root paths are shown against; a shell `cd` does not move it. */
 let root = ''
+let home = ''
+
+const expandHome = (path: string) => (home && /^~(\/|$)/.test(path) ? `${home}${path.slice(1)}` : path)
 let nvimServer = ''
 
 /** `path` against `dir` (the calling loop's directory: a subagent's may be a worktree of its own). */
@@ -317,10 +349,15 @@ const diffFields = (view: FileView & { mode: 'diff' }): Partial<Activity> => ({
   removed: view.removed,
 })
 
+type Found = Omit<Activity, 'id' | 'agentId' | 'tool' | 'phase' | 'at'>
+
 type Plan = {
-  activity: Omit<Activity, 'id' | 'agentId' | 'tool' | 'phase' | 'at'>
-  /** Runs after the tool answered; what it returns is merged into the activity. */
-  after?: (ran: ToolCallResult) => Promise<Partial<Activity>>
+  activity: Found
+  /**
+   * Runs after the tool answered; what it returns is merged into the activity,
+   * and each of `more` (further files the call changed) is an activity of its own.
+   */
+  after?: (ran: ToolCallResult) => Promise<Partial<Activity> & { more?: Found[] }>
 }
 
 const base = (kind: ActivityKind, label: string, path: string | null = null) => ({
@@ -379,6 +416,40 @@ async function writePlan($: EngineInterface, path: string, label: string, isTool
   }
 }
 
+/**
+ * Any other command (a script, `sed -i`, `perl -pi`, a formatter) may change the
+ * files it names: each is read before it runs and diffed after, and the ones that
+ * changed are the call's edits.
+ */
+async function shellPlan($: EngineInterface, command: string, here: string): Promise<Plan> {
+  const dir = shellDir(command)
+  const paths = namedPaths(command)
+    .map(expandHome)
+    .filter(path => path.startsWith('/') || dir !== null)
+    .map(path => absolute(path, dir ? absolute(dir, here) : here))
+  const before = new Map<string, string | null>()
+  for (const path of paths) before.set(path, await readText($, path))
+  return {
+    activity: base('shell', command),
+    after: async () => {
+      const changed: Found[] = []
+      for (const [path, was] of before) {
+        const now = await readText($, path)
+        if (now === null || now === was) continue
+        if (was === null) {
+          const lines = splitLines(now)
+          changed.push({ ...base('write', command, path), line: 1, endLine: lines.length, added: lines.length, removed: 0, view: sourceView(path, lines, 1, 0, 0, READ_WINDOW) })
+          continue
+        }
+        const view = diffView(path, was, now)
+        if (view?.mode === 'diff') changed.push({ ...base('edit', command, path), endLine: null, ...diffFields(view) })
+      }
+      const [first, ...more] = changed
+      return first ? { ...first, more } : {}
+    },
+  }
+}
+
 async function plan($: EngineInterface, e: ToolCallInput, here: string): Promise<Plan> {
   const tool = String(e.tool)
   if (e.tool === 'Read') {
@@ -413,10 +484,10 @@ async function plan($: EngineInterface, e: ToolCallInput, here: string): Promise
   if (e.tool === 'NotebookEdit') return { activity: base('edit', e.notebook_path, absolute(e.notebook_path, here)) }
   if (e.tool === 'Bash') {
     const found = parseShell(e.command)
-    const path = found && absolute(found.path, found.dir === undefined ? here : absolute(found.dir, here))
+    const path = found && absolute(expandHome(found.path), found.dir === undefined ? here : absolute(found.dir, here))
     if (found?.kind === 'read' && path) return readPlan($, path, found.from ?? 1, found.to ?? null, e.command)
     if (found?.kind === 'write' && path) return writePlan($, path, e.command)
-    return { activity: base('shell', e.command) }
+    return shellPlan($, e.command, here)
   }
   if (tool === 'Grep' || tool === 'Glob') {
     const args = e as unknown as { pattern?: string; path?: string }
@@ -579,6 +650,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     root = await $.session.root().catch(() => $.session.cwd())
+    home = (await $.env.get('HOME').catch(() => undefined)) ?? ''
     await $.command.register({
       name: 'follow',
       description: 'Follow the agent: open the live file pane, or `live`, `clear`',
@@ -661,8 +733,17 @@ export const register: Register = (on, options) => {
       throw error
     }
     const isError = ran.deny !== undefined || ran.isError === true
-    const extra = p.after && !isError ? await p.after(ran).catch(() => ({})) : {}
+    type After = Awaited<ReturnType<NonNullable<Plan['after']>>>
+    const { more = [], ...extra }: After = p.after && !isError ? await p.after(ran).catch(() => ({})) : {}
     await settle(extra, isError ? 'error' : 'done')
+    if (more.length > 0) {
+      const also = more.map((m, i): Activity => ({ ...activity, ...m, id: `${activity.id}#${i + 1}`, phase: 'done' }))
+      const keep = await read($, pinned)
+      await update($, activities, list => {
+        const at = list.findIndex(a => a.id === activity.id)
+        return trim([...list.slice(0, at + 1), ...also, ...list.slice(at + 1)], keep)
+      })
+    }
 
     return ran
   }).catch(($, e, next) => next(e))

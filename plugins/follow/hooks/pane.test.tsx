@@ -195,3 +195,45 @@ test('follows a cd, trusts the tool over its snapshot, and starts over on /clear
     await ui.unmount()
   }
 })
+
+test('shows what a script changed as edits, one per file', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-20T10:00:00Z') })
+  const NOTES = '/work/app/notes.md'
+  const files = new Map<string, string>([
+    [FILE, Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join('\n') + '\n'],
+    [NOTES, 'one\n'],
+  ])
+  on('fs.read', (_, e) => {
+    const text = files.get((e as { path: string }).path)
+    if (text === undefined) throw new Error('ENOENT')
+    return { value: text } as never
+  })
+  on('session.cwd', () => ({ value: '/work/app' }) as never)
+  on('session.root', () => ({ value: '/work/app' }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('tool.call', (_, e) => {
+    if (e.tool === 'Bash' && e.command.includes('python3')) {
+      files.set(FILE, files.get(FILE)!.replace('line 7', 'line seven'))
+      files.set(NOTES, 'one\ntwo\n')
+    }
+    return { result: {} as never, text: 'ok' }
+  })
+
+  await $.tool.call({
+    tool: 'Bash',
+    command: "cd src && python3 - <<'EOF'\np = 'main.ts'\ns = open(p).read().replace('line 7', 'line seven')\nopen('../notes.md', 'a').write('two')\nEOF",
+  })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'follow', surface, component: 'Pane', requestId: 'follow', props: props() })
+    await ui.drawn()
+    expect(await ui.find({ type: 'Text', text: /^Edit$/ })).toBeDefined()
+    const source = String((await ui.find({ type: 'Code' }))?.props.source)
+    expect(source).toContain('-line 7')
+    expect(source).toContain('+line seven')
+    // Both files the script changed are in Files.
+    expect(await ui.find({ type: 'Text', text: 'src/main.ts' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'notes.md' })).toBeDefined()
+    await ui.unmount()
+  }
+})
