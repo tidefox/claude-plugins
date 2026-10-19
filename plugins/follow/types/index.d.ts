@@ -43,6 +43,8 @@ declare module 'claude-code' {
       activities: Activity[]
       /** The activity the person pinned the pane to; null follows live. */
       pinned: string | null
+      /** Where the person scrolled the code window, for the activity it showed; another activity follows again. */
+      scroll: { id: string; top: number } | null
     }
   }
 }

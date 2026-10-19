@@ -47,10 +47,11 @@ test('follows a read, an edit and a scratchpad write into the pane', async ($, o
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'follow', surface, component: 'Pane', requestId: 'follow', props: props() })
     await ui.drawn()
-    expect(await ui.find({ type: 'Text', text: / READ / })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Read$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /main\.ts:10-14/ })).toBeDefined()
     const code = await ui.find({ type: 'Code' })
-    expect(code?.props.startLine).toBe(10)
+    // The whole file, the read's first line a third of the way down the window.
+    expect(code?.props.startLine).toBe(4)
     await ui.unmount()
   }
 
@@ -59,7 +60,7 @@ test('follows a read, an edit and a scratchpad write into the pane', async ($, o
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'follow', surface, component: 'Pane', requestId: 'follow', props: props() })
     await ui.drawn()
-    expect(await ui.find({ type: 'Text', text: / EDIT / })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Edit$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /main\.ts:20/ })).toBeDefined()
     const code = await ui.find({ type: 'Code' })
     expect(code?.props.format).toBe('diff')
@@ -75,8 +76,8 @@ test('follows a read, an edit and a scratchpad write into the pane', async ($, o
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'follow', surface, component: 'Pane', requestId: 'follow', props: props() })
     await ui.drawn()
-    expect(await ui.find({ type: 'Text', text: / WRITE / })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: / SCRATCH / })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Write$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /scratch/ })).toBeDefined()
     expect(await ui.findAll({ type: 'Button', text: /main\.ts/ })).not.toHaveLength(0)
 
     // Pinning an older trail row holds the view there.
@@ -84,10 +85,23 @@ test('follows a read, an edit and a scratchpad write into the pane', async ($, o
     const readRow = rows.find(r => /^trail:/.test(r.key ?? '') && /10-14/.test(r.text))
     expect(readRow).toBeDefined()
     await ui.press({ key: readRow?.key ?? '' })
-    expect(await ui.find({ type: 'Text', text: /Pinned/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: / READ / })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /PINNED/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Read$/ })).toBeDefined()
+    // The code window scrolls inside the fixed layout over the whole file.
+    expect(await ui.find({ type: 'Text', text: 'lines 4–23 of 31' })).toBeDefined()
+    await ui.press({ key: 'down' })
+    expect(await ui.find({ type: 'Text', text: 'lines 7–26 of 31' })).toBeDefined()
+    await ui.press({ key: 'up' })
+    await ui.press({ key: 'up' })
+    expect(await ui.find({ type: 'Text', text: 'lines 1–20 of 31' })).toBeDefined()
+    await ui.press({ key: 'end' })
+    expect(await ui.find({ type: 'Text', text: 'lines 12–31 of 31' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /PINNED/ })).toBeDefined()
+    // The snap-back button sits beside the chip.
+    expect(await ui.find({ type: 'Button', key: 'live' })).toBeDefined()
+    expect(await ui.find({ type: 'Box', key: 'code' })).toMatchObject({ props: { height: 20 } })
     await ui.press({ key: 'live' })
-    expect(await ui.find({ type: 'Text', text: /Following/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /LIVE/ })).toBeDefined()
     await ui.unmount()
   }
 })

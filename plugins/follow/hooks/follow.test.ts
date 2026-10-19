@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { buildHunk, isScratchPath, lineOf, parseShell, splitLines } from './register'
+import { autoTop, buildHunk, codeLayout, diffRows, isScratchPath, lineOf, oneLine, parseShell, splitLines, thumb, windowDiff } from './register'
 
 test('finds the line an edit lands on', async () => {
   const text = 'a\nb\nc\nneedle\ne\n'
@@ -62,6 +62,9 @@ test('reads file access out of shell commands', async () => {
   expect(parseShell('echo hi | tee -a log.txt')).toEqual({ kind: 'write', path: 'log.txt' })
   expect(parseShell('npm test 2>/dev/null')).toBe(null)
   expect(parseShell('ls -la')).toBe(null)
+  expect(parseShell("python3 -c 'print(1)' && test $a > b")).toBe(null)
+  expect(parseShell('if [ x >= y ]; then :; fi')).toBe(null)
+  expect(parseShell('echo hi > out.txt')).toEqual({ kind: 'write', path: 'out.txt' })
   expect(parseShell('pnpm test 2>&1 | head -40')).toBe(null)
   expect(parseShell('git log | tail -n 20')).toBe(null)
   expect(parseShell('grep -E "a>b|c" src/x.ts')).toBe(null)
@@ -73,4 +76,37 @@ test('reads file access out of shell commands', async () => {
 test('knows a scratchpad path', async () => {
   expect(isScratchPath('/tmp/claude-501/x/scratchpad/plan.md')).toBe(true)
   expect(isScratchPath('/home/me/src/app.ts')).toBe(false)
+})
+
+test('windows a diff into hunks that still parse', async () => {
+  const before = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`)
+  const after = before.map(l => (l === 'line 5' || l === 'line 25' ? `${l} changed` : l))
+  const rows = diffRows(buildHunk(before, after)?.hunk ?? '')
+  expect(rows.length).toBe(16)
+  expect(windowDiff(rows, 0, 100)).toBe(buildHunk(before, after)?.hunk)
+  // Rows 6..10 span the end of the first hunk and the start of the second.
+  expect(windowDiff(rows, 6, 4)).toBe(['@@ -7,2 +7,2 @@', ' line 7', ' line 8', '@@ -22,2 +22,2 @@', ' line 22', ' line 23'].join('\n'))
+  const insert = diffRows('@@ -1,0 +2,1 @@\n+x')
+  expect(insert[0]).toMatchObject({ t: '+', old: 2, new: 2 })
+  expect(windowDiff(insert, 0, 5)).toBe('@@ -1,0 +2,1 @@\n+x')
+})
+
+test('keeps the layout fixed and centres the focus a third down', async () => {
+  expect(codeLayout(40, 5, 6)).toEqual({ codeTop: 4, codeRows: 20 })
+  expect(codeLayout(16, 3, 3).codeRows).toBe(4)
+  expect(autoTop(50, 300, 30)).toBe(40)
+  expect(autoTop(2, 300, 30)).toBe(0)
+  expect(autoTop(295, 300, 30)).toBe(270)
+})
+
+test('folds a label onto one line', async () => {
+  expect(oneLine("cd /x/y && python3 - <<'EOF'\np = 1\nEOF")).toBe("python3 - <<'EOF' p = 1 EOF")
+  expect(oneLine('cd /x; sed -n 1,5p a.ts')).toBe('sed -n 1,5p a.ts')
+})
+
+test('sizes and places the scrollbar thumb', async () => {
+  expect(thumb(0, 10, 20)).toEqual({ from: 0, size: 20 })
+  expect(thumb(0, 100, 20)).toEqual({ from: 0, size: 4 })
+  expect(thumb(80, 100, 20)).toEqual({ from: 16, size: 4 })
+  expect(thumb(40, 100, 20)).toEqual({ from: 8, size: 4 })
 })

@@ -1,7 +1,9 @@
 {
   "name": "follow",
-  "version": "0.2.0",
-  "author": { "name": "tidefox" },
+  "version": "0.3.0",
+  "author": {
+    "name": "tidefox"
+  },
   "description": "Follow the agent: a live sidebar showing the file and lines it is reading, editing or writing right now, like Zed's follow mode",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -10,6 +12,12 @@
       "title": "Neovim server to mirror into",
       "description": "Optional. A Neovim --listen address (e.g. /tmp/nvim-follow.sock): each focus change opens the file at the line there too",
       "default": ""
+    },
+    "codeBackground": {
+      "type": "string",
+      "title": "Code view background",
+      "description": "auto: a shade dimmer than the terminal, by theme. none: no fill. Or any color, e.g. #1e1e2e",
+      "default": "auto"
     }
   }
 }
