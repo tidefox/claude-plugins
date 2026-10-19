@@ -539,24 +539,6 @@ export function diffRows(hunks: string): DiffRow[] {
   return rows
 }
 
-/** Rows `top .. top+count` of a diff as hunks that parse: each run of one hunk under a header of its own. */
-export function windowDiff(rows: DiffRow[], top: number, count: number): string {
-  const shown = rows.slice(Math.max(0, top), Math.max(0, top) + count)
-  const out: string[] = []
-  let k = 0
-  while (k < shown.length) {
-    const run: DiffRow[] = []
-    const hunk = shown[k]!.hunk
-    while (k < shown.length && shown[k]!.hunk === hunk) run.push(shown[k++]!)
-    const first = run[0]!
-    const oldCount = run.filter(r => r.t !== '+').length
-    const newCount = run.filter(r => r.t !== '-').length
-    const range = (line: number, n: number) => `${n === 0 ? line - 1 : line},${n}`
-    out.push(`@@ -${range(first.old, oldCount)} +${range(first.new, newCount)} @@`, ...run.map(r => `${r.t}${r.text}`))
-  }
-  return out.join('\n')
-}
-
 /** Where the code window starts on its own: the focus a third of the way down. */
 export function autoTop(focusAt: number, total: number, rows: number): number {
   return Math.min(Math.max(0, total - rows), Math.max(0, focusAt - Math.floor(rows / 3)))
@@ -572,6 +554,127 @@ export function codeLayout(bodyRows: number, fileRows: number, trailRows: number
   return { codeTop, codeRows: Math.max(4, bodyRows - codeTop - (2 + fileRows) - (2 + trailRows) - 1) }
 }
 
+// ── cells ──────────────────────────────────────────────────────────────────
+
+/** East Asian Wide and Fullwidth: CJK, and the emoji a terminal draws two cells wide. */
+const WIDE =
+  /[\u1100-\u115f\u231a-\u231b\u2329-\u232a\u23e9-\u23ec\u23f0\u23f3\u25fd-\u25fe\u2614-\u2615\u2648-\u2653\u267f\u2693\u26a1\u26aa-\u26ab\u26bd-\u26be\u26c4-\u26c5\u26ce\u26d4\u26ea\u26f2-\u26f3\u26f5\u26fa\u26fd\u2705\u270a-\u270b\u2728\u274c\u274e\u2753-\u2755\u2757\u2795-\u2797\u27b0\u27bf\u2b1b-\u2b1c\u2b50\u2b55\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\ua960-\ua97f\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6\u{16fe0}-\u{18cff}\u{1b000}-\u{1b2ff}\u{1f004}\u{1f0cf}\u{1f18e}\u{1f191}-\u{1f19a}\u{1f1e6}-\u{1f1ff}\u{1f200}-\u{1f2ff}\u{1f300}-\u{1f64f}\u{1f680}-\u{1f6ff}\u{1f7e0}-\u{1f7eb}\u{1f90c}-\u{1f9ff}\u{1fa70}-\u{1faff}\u{20000}-\u{3fffd}]/u
+const ZERO = /[\u0300-\u036f\u200b-\u200f\u20d0-\u20ff\ufe00-\ufe0f]/u
+const TAB = 4
+
+/** Terminal cells one character takes: two for wide (CJK, emoji), none for a combining mark. */
+const charCells = (ch: string) => (ZERO.test(ch) ? 0 : WIDE.test(ch) ? 2 : 1)
+/** Printable ASCII, a cell a character: most source lines, measured and cut without a look at each character. */
+const ASCII = /^[ -~]*$/
+
+export function cellWidth(text: string): number {
+  if (ASCII.test(text)) return text.length
+  let n = 0
+  for (const ch of text) n += charCells(ch)
+  return n
+}
+
+/** Tabs as spaces to the next stop, so a line's width is known before it is drawn. */
+export function expandTabs(text: string): string {
+  if (!text.includes('\t')) return text
+  let out = ''
+  let col = 0
+  for (const ch of text) {
+    if (ch === '\t') {
+      const pad = TAB - (col % TAB)
+      out += ' '.repeat(pad)
+      col += pad
+    } else {
+      out += ch
+      col += charCells(ch)
+    }
+  }
+  return out
+}
+
+/** A line cut into rows of `room` cells, as a terminal wraps it: never none, a wide character never split. */
+export function wrapCells(text: string, room: number): string[] {
+  if (ASCII.test(text)) {
+    if (text.length <= room) return [text]
+    return Array.from({ length: Math.ceil(text.length / room) }, (_, i) => text.slice(i * room, (i + 1) * room))
+  }
+  const rows: string[] = []
+  let row = ''
+  let col = 0
+  for (const ch of text) {
+    const w = charCells(ch)
+    if (col + w > room && col > 0) {
+      rows.push(row)
+      row = ''
+      col = 0
+    }
+    row += ch
+    col += w
+  }
+  rows.push(row)
+  return rows
+}
+
+/** `text` in at most `room` cells: cut at the end with `…`. */
+export function clip(text: string, room: number): string {
+  if (cellWidth(text) <= room) return text
+  if (room <= 1) return room === 1 ? '…' : ''
+  let out = ''
+  let col = 0
+  for (const ch of text) {
+    const w = charCells(ch)
+    if (col + w > room - 1) break
+    out += ch
+    col += w
+  }
+  return `${out}…`
+}
+
+/** `text` in at most `room` cells: cut at the start with `…`, its end kept. */
+function clipStart(text: string, room: number): string {
+  if (cellWidth(text) <= room) return text
+  if (room <= 1) return room === 1 ? '…' : ''
+  let out = ''
+  let col = 0
+  for (const ch of Array.from(text).reverse()) {
+    const w = charCells(ch)
+    if (col + w > room - 1) break
+    out = ch + out
+    col += w
+  }
+  return `…${out}`
+}
+
+/** A path in at most `room` cells: its first directory and file name kept, the directories between elided from the middle. */
+export function shortenPath(path: string, room: number): string {
+  if (cellWidth(path) <= room) return path
+  const dirs = path.split('/')
+  const name = dirs.pop() ?? ''
+  for (let keep = dirs.length - 2; keep >= 0; keep--) {
+    const short = [dirs[0], '…', ...dirs.slice(dirs.length - keep), name].join('/')
+    if (cellWidth(short) <= room) return short
+  }
+  const bare = `…/${name}`
+  return dirs.length > 0 && cellWidth(bare) <= room ? bare : clipStart(path, room)
+}
+
+/**
+ * One row of the code window: a piece of a line, the line's numbers on either side and its diff
+ * marker; or, between two hunks of a diff, a gap.
+ */
+export type CodeRow = { line: number; part: number; text: string; t: ' ' | '-' | '+'; old: number; new: number; isGap?: true }
+
+/** Lines hard-wrapped to `room` cells, tabs expanded: one CodeRow per row the window draws, a gap where the hunk changes. */
+export function wrapRows(lines: { text: string; t: CodeRow['t']; old: number; new: number; hunk?: number }[], room: number): CodeRow[] {
+  const rows: CodeRow[] = []
+  lines.forEach((l, line) => {
+    const before = lines[line - 1]
+    if (before && before.hunk !== l.hunk) rows.push({ line, part: 0, text: '⋯', t: ' ', old: 0, new: 0, isGap: true })
+    wrapCells(expandTabs(l.text), Math.max(1, room)).forEach((text, part) => rows.push({ line, part, text, t: l.t, old: l.old, new: l.new }))
+  })
+  return rows
+}
+
 /** A scrollbar's thumb over `rows` cells for a window at `top` of `total`: where it starts and how long. */
 export function thumb(top: number, total: number, rows: number): { from: number; size: number } {
   if (total <= rows) return { from: 0, size: rows }
@@ -581,17 +684,25 @@ export function thumb(top: number, total: number, rows: number): { from: number;
 }
 
 let codeBackgroundOption = 'auto'
-let themeBackground: string | undefined | null = null
+let themeName: string | null = null
+
+async function theme($: EngineInterface): Promise<string> {
+  themeName ??= String((await $.config.list().catch(() => [])).find(row => row.key === 'theme')?.value ?? '')
+  return themeName
+}
 
 /** The code window's fill: a shade dimmer than the terminal's, by theme, unless set in /config. */
 async function codeBackground($: EngineInterface): Promise<string | undefined> {
   if (codeBackgroundOption === 'none') return undefined
   if (codeBackgroundOption !== 'auto') return codeBackgroundOption
-  if (themeBackground === null) {
-    const theme = (await $.config.list().catch(() => [])).find(row => row.key === 'theme')?.value
-    themeBackground = /light/.test(String(theme ?? '')) ? '#eeeeee' : /ansi/.test(String(theme ?? '')) ? undefined : '#1c1c1c'
-  }
-  return themeBackground
+  const name = await theme($)
+  return /light/.test(name) ? '#eeeeee' : /ansi/.test(name) ? undefined : '#1c1c1c'
+}
+
+/** A Files or Trail row under the pointer: a step off the fill, by theme. */
+async function rowHover($: EngineInterface): Promise<string> {
+  const name = await theme($)
+  return /light/.test(name) ? '#dcdcdc' : /ansi/.test(name) ? 'subtle' : '#303030'
 }
 
 /** What the code window last drew: the wheel and j/k move it from there. */
@@ -640,13 +751,22 @@ async function reset($: EngineInterface) {
 
 const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: 'Follow', columns: SIDEBAR_COLUMNS, rows: 30 })
 
-const clip = (text: string, room: number) =>
-  text.length <= room ? text : room <= 1 ? '…' : `${text.slice(0, room - 1)}…`
+/** An activity's path:line (or its one-line label) in at most `room` cells, its file name kept. */
+const fitActivity = (a: Activity, room: number) => (a.path === null ? clip(oneLine(a.label), room) : shortenPath(shortPath(a), room))
+
+/** The last wrap, kept while its lines and width hold: a redraw would wrap the whole file again. */
+let wrapped: { of: unknown; room: number; rows: CodeRow[] } | null = null
+function wrapOnce(of: unknown, room: number, lines: () => Parameters<typeof wrapRows>[0]): CodeRow[] {
+  if (wrapped && wrapped.of === of && wrapped.room === room) return wrapped.rows
+  const rows = wrapRows(lines(), room)
+  wrapped = { of, room, rows }
+  return rows
+}
 
 export const register: Register = (on, options) => {
   nvimServer = String(options.nvimServer ?? '').trim()
   codeBackgroundOption = String(options.codeBackground ?? 'auto').trim() || 'auto'
-  themeBackground = null
+  themeName = null
 
   on('session.start', async ($, e, next) => {
     root = await $.session.root().catch(() => $.session.cwd())
@@ -719,7 +839,7 @@ export const register: Register = (on, options) => {
     const keep = await read($, pinned)
     await update($, activities, list => trim([activity, ...list.filter(a => a.id !== activity.id)], keep))
     if (keep === null) void mirror($, activity)
-    if (activity.kind !== 'other') $.ui.status(`◉ ${BADGE[activity.kind].label.toLowerCase()} ${clip(shortPath(activity), 48)}`)
+    if (activity.kind !== 'other') $.ui.status(`◉ ${BADGE[activity.kind].label.toLowerCase()} ${fitActivity(activity, 48)}`)
 
     const settle = (extra: Partial<Activity>, phase: Activity['phase']) =>
       update($, activities, list => list.map((a): Activity => (a.id === activity.id ? { ...a, ...extra, phase } : a)))
@@ -766,6 +886,7 @@ export const register: Register = (on, options) => {
     const pinnedOne = list.find(a => a.id === pin)
     const focus = pinnedOne ?? pool.find(a => a.view !== null) ?? pool.find(a => a.path !== null)
     const now = pool[0]
+    const isIdle = list.length === 0
 
     let who = 'main agent'
     if (viewed !== null) {
@@ -775,6 +896,8 @@ export const register: Register = (on, options) => {
       who = `main › ${mine[0]?.label ?? 'subagent'}`
     } else if (mine.length === 0 && list.length > 0) {
       who = 'newest activity'
+    } else if (isIdle) {
+      who = 'waiting for Claude'
     }
 
     const badge = (a: Activity) => (
@@ -797,17 +920,6 @@ export const register: Register = (on, options) => {
       added == null || removed == null ? 0 : `${added}${removed}`.length + 7
     const mark = (a: Activity) => (a.phase === 'running' ? '…' : a.phase === 'error' ? '✗' : a.isHeld ? 'held' : '')
 
-    if (list.length === 0) {
-      drawn = null
-      return (
-        <Box flexDirection="column" paddingX={1}>
-          <Text bold color="claude">◉ Follow</Text>
-          <Text dimColor>Nothing yet. Every file Claude reads, edits or writes</Text>
-          <Text dimColor>shows up here, at the line it is working on.</Text>
-        </Box>
-      )
-    }
-
     // A fixed layout as tall as the body: the code window takes what the header,
     // Files and Trail leave, and scrolls inside itself while they stay put.
     const rows = Math.max(16, e.props.scroll.bodyRows)
@@ -815,22 +927,31 @@ export const register: Register = (on, options) => {
     const fileRows = isRoomy ? FILE_ROWS : 3
     const trailRows = isRoomy ? TRAIL_ROWS : 3
     const layout = codeLayout(rows, fileRows, trailRows)
-    const inner = width - 2
+    // A block's text runs between the pane's padding, its accent bar and its own padding.
+    const inner = width - 5
 
-    // What the code window scrolls over: the whole file for a read, the diff for a change.
-    let codeTotal = 0
+    // What the code window scrolls over: the whole file for a read, the diff for a change,
+    // each line hard-wrapped into rows under a gutter as wide as its largest line number.
+    let codeRows: CodeRow[] = []
     let codeAuto = 0
-    let drawCode: (top: number) => unknown = () => <Text dimColor>(no preview)</Text>
-    let place = (_from: number, _to: number) => ''
+    let gutter = 0
+    let digits = 1
+    let isFocusLine = (_row: CodeRow) => false
+    let place = (_from: CodeRow, _to: CodeRow) => ''
+    const fit = (lines: { old: number; new: number }[], extra: number) => {
+      digits = String(lines.reduce((n, l) => Math.max(n, l.old, l.new), 1)).length
+      gutter = extra + digits * (extra > 3 ? 2 : 1)
+      // The scrollbar's column is kept whether it shows or not: the wrap must not depend on it.
+      return Math.max(8, inner - 1 - gutter)
+    }
     if (focus?.view?.mode === 'diff') {
       const view = focus.view
       const diff = diffRows(view.hunk)
-      codeTotal = diff.length
-      codeAuto = Math.max(0, diff.findIndex(r => r.t !== ' ') - HUNK_CONTEXT)
-      drawCode = top => (
-        <Code source={windowDiff(diff, top, layout.codeRows) || ' '} format="diff" path={view.path} wrap="truncate-end" />
-      )
-      place = (from, to) => `diff rows ${from}–${to} of ${diff.length}${view.isCut ? ' (cut)' : ''}`
+      // old new ±: two numbers, a space after each, the sign and a space.
+      const room = fit(diff, 4)
+      codeRows = wrapOnce(view.hunk, room, () => diff)
+      codeAuto = Math.max(0, codeRows.findIndex(r => r.t !== ' ') - HUNK_CONTEXT)
+      place = (from, to) => `diff lines ${from.line + 1}–${to.line + 1} of ${diff.length}${view.isCut ? ' (cut)' : ''}`
     } else if (focus?.path) {
       const whole = await fileLines($, focus.path)
       const view = focus.view?.mode === 'source' ? focus.view : null
@@ -838,34 +959,73 @@ export const register: Register = (on, options) => {
       const first = whole !== null ? 1 : view?.startLine ?? 1
       const focusFrom = focus.line ?? view?.focusFrom ?? first
       const focusTo = Math.max(focusFrom, focus.endLine ?? view?.focusTo ?? focusFrom)
-      codeTotal = lines.length
-      codeAuto = autoTop(focusFrom - first, lines.length, layout.codeRows)
-      drawCode = top => {
-        const shown = lines.slice(top, top + layout.codeRows)
-        const startLine = first + top
-        return (
-          <Box flexDirection="row">
-            <Box flexDirection="column" flexShrink={0}>
-              {shown.map((_, i) => {
-                const n = startLine + i
-                const isFocus = n >= focusFrom && n <= focusTo
-                return <Text color={focus.kind === 'read' ? 'suggestion' : 'warning'}>{isFocus ? (focus.kind === 'read' ? '│' : '▌') : ' '}</Text>
-              })}
-            </Box>
-            <Box flexGrow={1} flexShrink={1}>
-              <Code source={shown.join('\n') || ' '} path={focus.path ?? ''} startLine={startLine} wrap="truncate-end" />
-            </Box>
-          </Box>
-        )
-      }
-      place = (from, to) => `lines ${from}–${to} of ${lines.length}`
+      const numbered = () => lines.map((text, i) => ({ text, t: ' ' as const, old: first + i, new: first + i }))
+      // mark, number, a space.
+      const room = fit([{ old: 0, new: first + lines.length - 1 }], 2)
+      codeRows = wrapOnce(lines, room, numbered)
+      const at = codeRows.findIndex(r => r.new >= focusFrom)
+      codeAuto = autoTop(at < 0 ? 0 : at, codeRows.length, layout.codeRows)
+      isFocusLine = row => row.new >= focusFrom && row.new <= focusTo
+      place = (from, to) => `lines ${from.new}–${to.new} of ${first + lines.length - 1}`
     }
+    const codeTotal = codeRows.length
 
     const maxTop = Math.max(0, codeTotal - layout.codeRows)
     const isScrolled = focus !== undefined && scrolled !== null && scrolled.id === focus.id
     const top = Math.min(maxTop, Math.max(0, isScrolled ? scrolled.top : codeAuto))
     drawn = focus ? { id: focus.id, top, maxTop, codeTop: layout.codeTop, codeRows: layout.codeRows } : null
-    const where = place(top + 1, Math.min(codeTotal, top + layout.codeRows))
+    const shown = codeRows.slice(top, top + layout.codeRows)
+    const where = shown.length > 0 ? place(shown[0]!, shown[shown.length - 1]!) : ''
+
+    const TONE = { ' ': undefined, '+': 'diffAdded', '-': 'diffRemoved' } as const
+    const drawCode = () => {
+      if (shown.length === 0) return <Text dimColor>(no preview)</Text>
+      const isDiff = focus?.view?.mode === 'diff'
+      const mark = focus?.kind === 'read' ? '│' : '▌'
+      const markColor = focus?.kind === 'read' ? 'suggestion' : 'warning'
+      const num = (n: number, isShown: boolean) => (isShown ? String(n) : '').padStart(digits)
+      // Runs of one tone share a Code, so a diff's rows take their background and a file stays one highlight.
+      const runs: CodeRow[][] = []
+      for (const row of shown) {
+        const last = runs[runs.length - 1]
+        if (last && last[0]!.t === row.t && !last[0]!.isGap && !row.isGap) last.push(row)
+        else runs.push([row])
+      }
+      return (
+        <Box flexDirection="row">
+          <Box flexDirection="column" flexShrink={0} width={gutter}>
+            {shown.map(row => {
+              const isFirst = row.part === 0 && !row.isGap
+              if (isDiff) {
+                return (
+                  <Text dimColor={row.t === ' '} color={row.t === '+' ? 'success' : row.t === '-' ? 'error' : undefined} backgroundColor={TONE[row.t]}>
+                    {`${num(row.old, isFirst && row.t !== '+')} ${num(row.new, isFirst && row.t !== '-')} ${isFirst ? row.t : ' '} `}
+                  </Text>
+                )
+              }
+              const isFocus = isFocusLine(row)
+              return (
+                <Text>
+                  <Text color={markColor}>{isFocus ? mark : ' '}</Text>
+                  <Text dimColor={!isFocus} bold={isFocus} color={isFocus ? markColor : undefined}>{`${num(row.new, isFirst)} `}</Text>
+                </Text>
+              )
+            })}
+          </Box>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            {runs.map((run, i) => (
+              <Box key={`run:${i}`} height={run.length} backgroundColor={TONE[run[0]!.t]}>
+                {run[0]!.isGap ? (
+                  <Text dimColor>⋯</Text>
+                ) : (
+                  <Code source={run.map(r => r.text).join('\n') || ' '} path={focus?.path ?? ''} wrap="truncate-end" />
+                )}
+              </Box>
+            ))}
+          </Box>
+        </Box>
+      )
+    }
 
     const files: { path: string; letters: Set<string>; latest: Activity; added: number | null; removed: number | null }[] = []
     for (const a of pool) {
@@ -887,7 +1047,7 @@ export const register: Register = (on, options) => {
     const followLive = () => Promise.all([update($, pinned, () => null), update($, scroll, () => null)])
     const panel = await codeBackground($)
     const isLive = pin === null && !isScrolled
-    const chip = pin !== null ? { text: '◎ PINNED', color: 'warning' } : isScrolled ? { text: '◎ SCROLLED', color: 'warning' } : { text: '● LIVE', color: 'claude' }
+    const chip = isIdle ? { text: '○ IDLE', color: 'inactive' } : pin !== null ? { text: '◎ PINNED', color: 'warning' } : isScrolled ? { text: '◎ SCROLLED', color: 'warning' } : { text: '● LIVE', color: 'claude' }
     const isChange = (kind: ActivityKind) => kind === 'edit' || kind === 'write'
 
     // A block as OpenCode draws one: an accent bar down its left, a raised fill.
@@ -905,14 +1065,22 @@ export const register: Register = (on, options) => {
     )
     const heading = (title: string, note: string) => (
       <Box flexDirection="row" height={1}>
-        <Box flexGrow={1}>
-          <Text bold>{title}</Text>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text bold wrap="truncate-end">{title}</Text>
         </Box>
-        <Text dimColor>{note}</Text>
+        <Box flexShrink={0}>
+          <Text dimColor>{note}</Text>
+        </Box>
       </Box>
     )
 
     const grip = thumb(top, codeTotal, layout.codeRows)
+    const kindName = focus ? BADGE[focus.kind].label.charAt(0) + BADGE[focus.kind].label.slice(1).toLowerCase() : ''
+    const focusAge = focus ? mark(focus) || ago(t - focus.at) : ''
+    const focusRoom = focus
+      ? inner - cellWidth(kindName) - (focus.isScratch ? 8 : 0) - 1 - statWidth(focus.added, focus.removed) - 1 - cellWidth(focusAge)
+      : 0
+    const hover = await rowHover($)
 
     return (
       <Box flexDirection="column" paddingX={1} height={rows} overflow="hidden">
@@ -940,15 +1108,18 @@ export const register: Register = (on, options) => {
             layout.codeRows + 2,
             <Box flexDirection="column">
               <Box flexDirection="row" height={1}>
-                <Text bold color={BADGE[focus.kind].color}>
-                  {BADGE[focus.kind].label.charAt(0) + BADGE[focus.kind].label.slice(1).toLowerCase()}
-                </Text>
-                {focus.isScratch ? <Text color="remember"> scratch</Text> : ''}
-                <Box flexGrow={1} flexShrink={1}>
-                  <Text wrap="truncate-start" bold> {shortPath(focus)}</Text>
+                {/* The kind, the chips and the age keep their cells: only the path gives way. */}
+                <Box flexShrink={0}>
+                  <Text bold color={BADGE[focus.kind].color}>{kindName}</Text>
+                  {focus.isScratch ? <Text color="remember"> scratch</Text> : ''}
                 </Box>
-                {stat(focus.added, focus.removed)}
-                <Text dimColor> {mark(focus) || ago(t - focus.at)}</Text>
+                <Box flexGrow={1} flexShrink={1}>
+                  <Text wrap="truncate-start" bold>{` ${fitActivity(focus, focusRoom)}`}</Text>
+                </Box>
+                <Box flexShrink={0}>
+                  {stat(focus.added, focus.removed)}
+                  <Text dimColor>{` ${focusAge}`}</Text>
+                </Box>
               </Box>
               <Box flexDirection="row" height={1}>
                 <Box flexGrow={1} flexShrink={1}>
@@ -956,11 +1127,17 @@ export const register: Register = (on, options) => {
                     {focus.isHeld ? 'held for review: the file is unchanged' : focus.tool === 'Bash' ? `$ ${oneLine(focus.label)}` : where}
                   </Text>
                 </Box>
-                {maxTop > 0 ? <Text dimColor> {Math.round((top / maxTop) * 100)}%</Text> : ''}
+                {maxTop > 0 ? (
+                  <Box flexShrink={0}>
+                    <Text dimColor>{` ${Math.round((top / maxTop) * 100)}%`}</Text>
+                  </Box>
+                ) : (
+                  ''
+                )}
               </Box>
               <Box key="code" flexDirection="row" height={layout.codeRows} overflow="hidden">
                 <Box flexDirection="column" flexGrow={1} flexShrink={1} overflow="hidden">
-                  {drawCode(top) as never}
+                  {drawCode() as never}
                 </Box>
                 {maxTop > 0 ? (
                   <Box flexDirection="column" flexShrink={0}>
@@ -975,10 +1152,41 @@ export const register: Register = (on, options) => {
               </Box>
             </Box>,
           )
+        ) : isIdle ? (
+          block(
+            'idle',
+            'claude',
+            layout.codeRows + 2,
+            <Box flexDirection="column">
+              <Text bold color="claude">◉ Nothing yet. Watching for Claude's first move.</Text>
+              <Text dimColor wrap="wrap">Every file Claude reads, edits or writes opens here, at the line it is working on.</Text>
+              <Box marginTop={1} flexDirection="row" gap={1}>
+                {(['read', 'edit', 'write'] as const).map(k => (
+                  <Text key={`k:${k}`} bold color="inverseText" backgroundColor={BADGE[k].color}>{` ${BADGE[k].label} `}</Text>
+                ))}
+                <Text dimColor>open the file</Text>
+              </Box>
+              <Box flexDirection="row" gap={1}>
+                {(['shell', 'search', 'web', 'agent'] as const).map(k => (
+                  <Text key={`k:${k}`} bold color={BADGE[k].color}>{BADGE[k].label.toLowerCase()}</Text>
+                ))}
+                <Text dimColor>logged in the trail</Text>
+              </Box>
+              <Box marginTop={1} flexDirection="column">
+                <Text>
+                  <Text color="suggestion">│</Text>
+                  <Text dimColor> lines read   </Text>
+                  <Text color="warning">▌</Text>
+                  <Text dimColor> lines changed   </Text>
+                  <Text bold color="success" backgroundColor="diffAddedDimmed">{' +N '}</Text>
+                  <Text bold color="error" backgroundColor="diffRemovedDimmed">{' −M '}</Text>
+                </Text>
+                <Text dimColor wrap="wrap">p pin · f follow live · j/k scroll · /follow clear</Text>
+              </Box>
+            </Box>,
+          )
         ) : (
-          <Box marginTop={1} height={layout.codeRows + 2}>
-            <Text dimColor>No file touched yet.</Text>
-          </Box>
+          block('nofile', 'subtle', layout.codeRows + 2, <Text dimColor>No file touched yet.</Text>)
         )}
 
         {block(
@@ -987,20 +1195,25 @@ export const register: Register = (on, options) => {
           fileRows + 1,
           <Box flexDirection="column">
             {heading('Files', files.length > fileRows ? `${fileRows} of ${files.length}` : String(files.length))}
+            {files.length === 0 ? <Text dimColor>○ none yet</Text> : ''}
             {files.slice(0, fileRows).map(f => {
               const isChanged = f.letters.has('E') || f.letters.has('W')
+              const isScratch = isScratchPath(f.path)
+              // ● and a space, the ✎, then the chips or ` read` on the right.
+              const room = inner - 2 - (isScratch ? 2 : 0) - (isChanged ? statWidth(f.added, f.removed) : 5)
               return (
-                <Box key={`f:${f.path}`} flexDirection="row" height={1}>
+                // The whole row lights under the pointer, not only its text.
+                <Box key={`f:${f.path}`} flexDirection="row" height={1} hover={{ backgroundColor: hover }}>
                   <Box flexGrow={1} flexShrink={1}>
                     <Button key={`file:${f.path}`} plain onPress={() => update($, pinned, () => f.latest.id)}>
                       {isChanged ? <Text color="warning">●</Text> : <Text color="suggestion">○</Text>}{' '}
                       <Text bold={isChanged} dimColor={!isChanged}>
-                        {clip(relative(f.path), inner - 8 - statWidth(f.added, f.removed))}
+                        {shortenPath(relative(f.path), room)}
                       </Text>
-                      {isScratchPath(f.path) ? <Text color="remember"> ✎</Text> : ''}
+                      {isScratch ? <Text color="remember"> ✎</Text> : ''}
                     </Button>
                   </Box>
-                  {isChanged ? stat(f.added, f.removed) : <Text color="suggestion" dimColor>read</Text>}
+                  <Box flexShrink={0}>{isChanged ? stat(f.added, f.removed) : <Text color="suggestion" dimColor> read</Text>}</Box>
                 </Box>
               )
             })}
@@ -1013,23 +1226,28 @@ export const register: Register = (on, options) => {
           trailRows + 1,
           <Box flexDirection="column">
             {heading('Trail', 'newest first')}
+            {pool.length === 0 ? <Text dimColor>· waiting for the first tool call…</Text> : ''}
             {pool.slice(0, trailRows).map(a => {
               const age = mark(a) || ago(t - a.at)
               const isFocus = a.id === focus?.id
               const isQuiet = !isChange(a.kind) && !isFocus
+              // ▸, the kind padded to six and a space; the chips, a space and the age on the right.
+              const room = inner - 8 - statWidth(a.added, a.removed) - 1 - cellWidth(age)
               return (
-                <Box key={`t:${a.id}`} flexDirection="row" height={1}>
+                <Box key={`t:${a.id}`} flexDirection="row" height={1} hover={{ backgroundColor: hover }}>
                   <Box flexGrow={1} flexShrink={1}>
                     <Button key={`trail:${a.id}`} plain onPress={() => update($, pinned, () => a.id)}>
                       <Text color={isFocus ? 'claude' : 'subtle'}>{isFocus ? '▸' : ' '}</Text>
                       <Text bold={isChange(a.kind)} color={BADGE[a.kind].color}>{BADGE[a.kind].label.toLowerCase().padEnd(6)}</Text>{' '}
                       <Text dimColor={isQuiet} bold={isFocus}>
-                        {clip(a.path === null ? oneLine(a.label) : shortPath(a), inner - 12 - age.length - statWidth(a.added, a.removed))}
+                        {fitActivity(a, room)}
                       </Text>
                     </Button>
                   </Box>
-                  {stat(a.added, a.removed)}
-                  <Text dimColor> {age}</Text>
+                  <Box flexShrink={0}>
+                    {stat(a.added, a.removed)}
+                    <Text dimColor>{` ${age}`}</Text>
+                  </Box>
                 </Box>
               )
             })}

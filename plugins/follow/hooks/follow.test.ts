@@ -1,7 +1,27 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Activity } from '../types'
-import { autoTop, buildHunk, codeLayout, diffRows, isScratchPath, lineOf, namedPaths, oneLine, parseShell, shellDir, splitLines, thumb, trim, windowDiff } from './register'
+import {
+  autoTop,
+  buildHunk,
+  cellWidth,
+  clip,
+  codeLayout,
+  diffRows,
+  expandTabs,
+  isScratchPath,
+  lineOf,
+  namedPaths,
+  oneLine,
+  parseShell,
+  shellDir,
+  shortenPath,
+  splitLines,
+  thumb,
+  trim,
+  wrapCells,
+  wrapRows,
+} from './register'
 
 test('finds the line an edit lands on', async () => {
   const text = 'a\nb\nc\nneedle\ne\n'
@@ -118,17 +138,70 @@ test('knows a scratchpad path', async () => {
   expect(isScratchPath('/home/me/src/app.ts')).toBe(false)
 })
 
-test('windows a diff into hunks that still parse', async () => {
+test('numbers a diff on both sides', async () => {
   const before = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`)
   const after = before.map(l => (l === 'line 5' || l === 'line 25' ? `${l} changed` : l))
   const rows = diffRows(buildHunk(before, after)?.hunk ?? '')
   expect(rows.length).toBe(16)
-  expect(windowDiff(rows, 0, 100)).toBe(buildHunk(before, after)?.hunk)
-  // Rows 6..10 span the end of the first hunk and the start of the second.
-  expect(windowDiff(rows, 6, 4)).toBe(['@@ -7,2 +7,2 @@', ' line 7', ' line 8', '@@ -22,2 +22,2 @@', ' line 22', ' line 23'].join('\n'))
+  expect(rows.find(r => r.t === '-')).toMatchObject({ text: 'line 5', old: 5 })
+  expect(rows.find(r => r.t === '+')).toMatchObject({ text: 'line 5 changed', new: 5 })
   const insert = diffRows('@@ -1,0 +2,1 @@\n+x')
   expect(insert[0]).toMatchObject({ t: '+', old: 2, new: 2 })
-  expect(windowDiff(insert, 0, 5)).toBe('@@ -1,0 +2,1 @@\n+x')
+  // Where one hunk ends and the next begins, a gap row says the lines between are left out.
+  const drawn = wrapRows(rows, 80)
+  const gap = drawn.findIndex(r => r.isGap)
+  expect(drawn.filter(r => r.isGap)).toHaveLength(1)
+  expect([drawn[gap - 1]?.old, drawn[gap + 1]?.old]).toEqual([8, 22])
+})
+
+test('measures and cuts in terminal cells', async () => {
+  expect(cellWidth('Read')).toBe(4)
+  expect(cellWidth('日本')).toBe(4)
+  for (const emoji of ['🚀', '✅', '❌', '⚡', '⭐', '🦀', '🫠']) expect(cellWidth(emoji)).toBe(2)
+  expect(cellWidth('→✓')).toBe(2)
+  expect(cellWidth('é')).toBe(1)
+  // A combining accent takes no cell of its own.
+  expect(cellWidth(`e${String.fromCharCode(0x301)}`)).toBe(1)
+  expect(expandTabs('\tx\ty')).toBe('    x   y')
+  expect(clip('abcdef', 4)).toBe('abc…')
+  expect(clip('日本語', 4)).toBe('日…')
+  expect(clip('abc', 3)).toBe('abc')
+  expect(clip('abc', 0)).toBe('')
+})
+
+test('wraps a long line by cells, never splitting a wide character', async () => {
+  expect(wrapCells('abcdefghij', 4)).toEqual(['abcd', 'efgh', 'ij'])
+  expect(wrapCells('', 4)).toEqual([''])
+  expect(wrapCells('ab日本', 3)).toEqual(['ab', '日', '本'])
+  expect(wrapCells('ok 🚀 go', 4)).toEqual(['ok ', '🚀 g', 'o'])
+  const rows = wrapRows(
+    [
+      { text: 'short', t: ' ', old: 9, new: 9 },
+      { text: 'x'.repeat(10), t: ' ', old: 10, new: 10 },
+    ],
+    4,
+  )
+  expect(rows.map(r => [r.new, r.part, r.text])).toEqual([
+    [9, 0, 'shor'],
+    [9, 1, 't'],
+    [10, 0, 'xxxx'],
+    [10, 1, 'xxxx'],
+    [10, 2, 'xx'],
+  ])
+})
+
+test('shortens a path from the middle, keeping its file name', async () => {
+  const path = 'plugins/follow/hooks/deep/register.tsx'
+  expect(shortenPath(path, 80)).toBe(path)
+  expect(shortenPath(path, 30)).toBe('plugins/…/deep/register.tsx')
+  expect(shortenPath(path, 24)).toBe('plugins/…/register.tsx')
+  expect(shortenPath(path, 16)).toBe('…/register.tsx')
+  // Its line range is part of the name, so it stays.
+  expect(shortenPath('src/main.ts:10-14', 15)).toBe('…/main.ts:10-14')
+  // A name too long for the room keeps its end.
+  expect(shortenPath('src/main.ts:10-14', 14)).toBe('…main.ts:10-14')
+  expect(shortenPath('a-very-long-file-name.ts', 10)).toBe('…e-name.ts')
+  for (const room of [1, 5, 12, 20]) expect(cellWidth(shortenPath(path, room))).toBeLessThanOrEqual(room)
 })
 
 test('keeps the layout fixed and centres the focus a third down', async () => {
