@@ -8,6 +8,14 @@ A Claude Code mod that follows the agent, like Zed's "follow" mode: a live sideb
 - **Follow:** tracks whichever agent's transcript is in view. Open a subagent from the tasks list and the pane follows it. Press `p` (or click a file or trail row) to pin a view, and `f` to follow live again.
 - **Neovim mirror (optional):** set `nvimServer` in `/config` to a `nvim --listen` address, and each focus change opens the file at that line in your Neovim too.
 
+## Sidebar
+
+The pane docks as a sidebar beside the transcript only in Claude Code's fullscreen layout, in a terminal at least 110 columns wide. It asks for a 64-column dock; drag the edge to resize it. On the main screen (the default inside tmux) it opens above the prompt instead. To get the sidebar:
+
+```sh
+CLAUDE_CODE_NO_FLICKER=1 claude
+```
+
 ## Commands
 
 | Command | Does |

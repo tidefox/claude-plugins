@@ -4,6 +4,10 @@ import type { EngineInterface, Register, ToolCallInput, ToolCallResult } from 'c
 import type { Activity, ActivityKind, FileView } from '../types'
 
 const PANE = 'follow'
+/** The dock width asked for beside a fullscreen transcript; the person's own drag wins. */
+const SIDEBAR_COLUMNS = 64
+/** Docking is the surface's call: only the fullscreen layout from this width docks a pane. */
+const DOCK_MIN_COLUMNS = 110
 const MAX_ACTIVITIES = 80
 /** Only the newest few keep their file excerpt, so the state stays small. */
 const MAX_VIEWS = 12
@@ -305,6 +309,8 @@ function ago(ms: number) {
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h`
 }
 
+const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: 'Follow', columns: SIDEBAR_COLUMNS, rows: 30 })
+
 const clip = (text: string, room: number) =>
   text.length <= room ? text : room <= 1 ? '…' : `${text.slice(0, room - 1)}…`
 
@@ -319,7 +325,7 @@ export const register: Register = (on, options) => {
       argumentHint: '[live | clear]',
       immediate: true,
     })
-    void $.ui.open({ id: PANE, title: 'Follow' })
+    void openPane($)
 
     return next(e)
   })
@@ -332,8 +338,17 @@ export const register: Register = (on, options) => {
       return { text: 'Follow trail cleared.' }
     }
     if (verb === 'live') await update($, pinned, () => null)
-    await $.ui.open({ id: PANE, title: 'Follow' })
-    return { text: 'Following the agent.' }
+    await openPane($)
+    const { isFullscreen, columns } = e.presentation
+    if (!isFullscreen) {
+      return {
+        text: 'Following the agent, above the prompt. For a sidebar beside the transcript, restart with CLAUDE_CODE_NO_FLICKER=1 (fullscreen layout) in a terminal at least 110 columns wide.',
+      }
+    }
+    if (columns < DOCK_MIN_COLUMNS) {
+      return { text: `Following the agent. Widen the terminal to ${DOCK_MIN_COLUMNS}+ columns (now ${columns}) to dock it as a sidebar.` }
+    }
+    return { text: 'Following the agent in the sidebar.' }
   })
 
   on('tool.call', async ($, e, next) => {
