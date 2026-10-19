@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { findPr, parseChecks, phaseOf } from './register'
+import { checkLines, findPr, focusOf, paneLayout, parseChecks, phaseOf } from './register'
 
 const URL = 'https://github.com/acme/app/pull/42'
 
@@ -29,6 +29,103 @@ test('reads check buckets into a phase', async () => {
   expect(phaseOf(parseChecks(checks(['pass', 'fail'])))).toBe('failed')
   expect(phaseOf(parseChecks(checks(['pass', 'skipping'])))).toBe('passed')
   expect(parseChecks(checks(['pending']))[0]?.completedAt).toBe(null)
+})
+
+test('fits the checks list to its rows: failures first, passed and skipped collapsed', async () => {
+  const list = parseChecks(checks(['pass', 'pass', 'fail', 'pending', 'skipping', 'pass']))
+  const text = (room: number) => checkLines(list, room).map(l => ('check' in l ? `${l.check.bucket}:${l.check.name}` : l.text))
+  expect(text(10)).toEqual(['fail:job-2', 'pending:job-3', 'pass:job-0', 'pass:job-1', 'pass:job-5', '1 skipped'])
+  expect(text(4)).toEqual(['fail:job-2', 'pending:job-3', '3 passed', '1 skipped'])
+  // The counts give way before a failure's name does.
+  expect(text(3)).toEqual(['fail:job-2', 'pending:job-3', '3 passed'])
+  expect(text(2)).toEqual(['fail:job-2', 'pending:job-3'])
+  expect(text(1)).toEqual(['2 more'])
+  // The layout keeps the header, the PR list and the buttons: the checks get the rest.
+  expect(paneLayout(30)).toEqual({ listRows: 2, focusRows: 23, checkRows: 20 })
+  expect(paneLayout(40).listRows).toBe(4)
+})
+
+test('focuses the pinned PR, else the newest running one', async () => {
+  const pr = (number: number, phase: 'running' | 'passed') =>
+    ({ url: `u${number}`, number, phase }) as Parameters<typeof focusOf>[0][number]
+  const list = [pr(3, 'passed'), pr(2, 'running'), pr(1, 'running')]
+  expect(focusOf(list, null)?.number).toBe(2)
+  expect(focusOf(list, 'u1')?.number).toBe(1)
+  expect(focusOf(list, 'gone')?.number).toBe(2)
+  expect(focusOf([pr(3, 'passed')], null)?.number).toBe(3)
+})
+
+test('draws the whole layout blank before any PR is watched', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-09T10:00:00Z') })
+  on('config.list', () => ({ value: [{ key: 'theme', value: 'dark' }] }) as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'ci-watch',
+      surface,
+      component: 'Pane',
+      requestId: 'ci-watch',
+      props: { title: 'CI', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as never,
+    })
+    expect(await ui.find({ type: 'Text', text: /○ IDLE/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /No pull requests watched yet/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Pull requests$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /none yet/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('keeps a narrow pane inside its cells: whole badge, tally and times, long names cut', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-09T10:00:00Z') })
+  const ok = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never
+  for (const event of ['command.register', 'ui.status', 'ui.toast'] as const) on(event, () => ({ value: undefined }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.notify', () => ({ value: { isSent: true, channel: 'terminal_bell' } }) as never)
+  const long = 'x'.repeat(100)
+  on('process.run', (_, e) =>
+    e.argv[2] === 'view'
+      ? ok(JSON.stringify({ title: `Retry ${long}`, isDraft: true, headRefName: `feat/${long}` }))
+      : ok(
+          JSON.stringify(
+            ['pass', 'fail'].map((bucket, i) => ({
+              bucket,
+              name: `${bucket}-job-${long}`,
+              workflow: `workflow-${long}`,
+              link: `https://github.com/acme/app/actions/runs/9${i}/job/1`,
+              startedAt: '2026-10-09T10:00:00Z',
+              completedAt: '2026-10-09T10:01:05Z',
+            })),
+          ),
+          1,
+        ),
+  )
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: URL, stderr: '' }, text: URL }) as never)
+
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' })
+  await clock.advance(1000)
+  await clock.advance(10000)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'ci-watch',
+      surface,
+      component: 'Pane',
+      requestId: 'ci-watch',
+      props: { title: 'CI', isFocused: false, bodyColumns: 30, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as never,
+    })
+    await ui.drawn()
+    expect(await ui.find({ type: 'Text', text: ' FAILED ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' ✓1 ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' ✗1 ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' 1m05s' })).toBeDefined()
+    // The title and a check's name are cut to the cells left beside them, never wrapped.
+    const title = await ui.find({ type: 'Text', text: ' Retry…' })
+    expect(title).toBeDefined()
+    const link = await ui.find({ type: 'Link', text: 'fail-job…' })
+    expect(link).toBeDefined()
+    await ui.unmount()
+  }
 })
 
 test('watches a PR the agent opens until CI settles', async ($, on) => {
@@ -130,6 +227,16 @@ test('watches a PR the agent opens until CI settles', async ($, on) => {
     expect(await ui.find({ key: `rerun:${URL}` })).toBeDefined()
     await ui.unmount()
   }
+  // The PR's row pins it; follow live lets it go.
+  const listed = await pane()
+  expect(await listed.find({ type: 'Text', text: /^Pull requests$/ })).toBeDefined()
+  expect(await listed.find({ type: 'Text', text: / FAILED / })).toBeDefined()
+  await listed.press({ key: `pr:${URL}` })
+  expect(await listed.find({ type: 'Text', text: /◎ PINNED/ })).toBeDefined()
+  await listed.press({ key: 'live' })
+  expect(await listed.find({ type: 'Text', text: /○ SETTLED/ })).toBeDefined()
+  await listed.unmount()
+
   const ui = await pane()
   await ui.press({ key: `unwatch:${URL}` })
   expect(await ui.find({ type: 'Text', text: /No pull requests watched yet/ })).toBeDefined()

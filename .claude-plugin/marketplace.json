@@ -11,7 +11,7 @@
       "name": "ci-watch",
       "source": "./plugins/ci-watch",
       "description": "Watches CI on pull requests the agent drafts or opens, in a live pane, the status line and a notification when it settles",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "category": "productivity",
       "keywords": [
         "ci",

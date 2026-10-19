@@ -32,6 +32,7 @@ export type WatchedPr = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'ci-watch': { prs: WatchedPr[]; now: number; paneShown: boolean }
+    /** `pinned`: the PR url the pane holds in view; null follows the newest running PR. */
+    'ci-watch': { prs: WatchedPr[]; now: number; paneShown: boolean; pinned: string | null }
   }
 }
