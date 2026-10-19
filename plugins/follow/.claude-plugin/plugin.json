@@ -1,0 +1,15 @@
+{
+  "name": "follow",
+  "version": "0.1.0",
+  "author": { "name": "tidefox" },
+  "description": "Follow the agent: a live sidebar showing the file and lines it is reading, editing or writing right now, like Zed's follow mode",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "nvimServer": {
+      "type": "string",
+      "title": "Neovim server to mirror into",
+      "description": "Optional. A Neovim --listen address (e.g. /tmp/nvim-follow.sock): each focus change opens the file at the line there too",
+      "default": ""
+    }
+  }
+}

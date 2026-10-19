@@ -1,7 +1,11 @@
 {
   "name": "tidefox-plugins",
-  "owner": { "name": "tidefox" },
-  "metadata": { "description": "tidefox's Claude Code plugins" },
+  "owner": {
+    "name": "tidefox"
+  },
+  "metadata": {
+    "description": "tidefox's Claude Code plugins"
+  },
   "plugins": [
     {
       "name": "ci-watch",
@@ -9,7 +13,27 @@
       "description": "Watches CI on pull requests the agent drafts or opens, in a live pane, the status line and a notification when it settles",
       "version": "0.1.0",
       "category": "productivity",
-      "keywords": ["ci", "github", "pull-request", "gh", "tui"]
+      "keywords": [
+        "ci",
+        "github",
+        "pull-request",
+        "gh",
+        "tui"
+      ]
+    },
+    {
+      "name": "follow",
+      "source": "./plugins/follow",
+      "description": "Follow the agent: a live sidebar showing the file and lines it is reading, editing or writing right now, like Zed's follow mode",
+      "version": "0.1.0",
+      "category": "productivity",
+      "keywords": [
+        "follow",
+        "tui",
+        "pane",
+        "editor",
+        "nvim"
+      ]
     }
   ]
 }
