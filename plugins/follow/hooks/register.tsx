@@ -1029,11 +1029,11 @@ export const register: Register = (on, options) => {
     const types = [...new Set(working.map(g => g.type))]
     const what = !doing ? '' : doing.path === null ? footerWhat(doing.label) : `${shortenPath(shortPath(doing), 28)}${doing.line ? `:${doing.line}` : ''}`
     const modes = e.props.modes.join(' & ')
-    // Two rows: the labels (CI, subagents) over what the agent is doing.
+    // Two rows, right-aligned: the labels (CI, subagents) over what the agent is doing.
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" flexGrow={1} alignItems="flex-end">
         {modes || working.length > 0 ? (
-          <Box flexDirection="row" gap={1}>
+          <Box flexDirection="row" gap={1} justifyContent="flex-end">
             {modes ? <Text dimColor>{modes}</Text> : ''}
             {working.length > 0 ? (
               <Text>
@@ -1048,7 +1048,7 @@ export const register: Register = (on, options) => {
           ''
         )}
         {doing ? (
-          <Box flexDirection="row" gap={1}>
+          <Box flexDirection="row" gap={1} justifyContent="flex-end">
             <Text bold color={BADGE[doing.kind].color}>{BADGE[doing.kind].label.toLowerCase()}</Text>
             <Text dimColor={!isRunning} wrap="truncate-end">{what}</Text>
             {isRunning ? <Text dimColor>{ago(t - doing.at)}</Text> : ''}
