@@ -912,8 +912,8 @@ export const register: Register = (on, options) => {
       ) : (
         <Text>
           {' '}
-          <Text bold backgroundColor="diffAddedWord">{` +${added} `}</Text>
-          <Text bold backgroundColor="diffRemovedWord">{` −${removed} `}</Text>
+          <Text bold backgroundColor="#1d460f">{` +${added} `}</Text>
+          <Text bold backgroundColor="#540d06">{` −${removed} `}</Text>
         </Text>
       )
     const statWidth = (added: number | null, removed: number | null) =>
@@ -977,7 +977,7 @@ export const register: Register = (on, options) => {
     const shown = codeRows.slice(top, top + layout.codeRows)
     const where = shown.length > 0 ? place(shown[0]!, shown[shown.length - 1]!) : ''
 
-    const TONE = { ' ': undefined, '+': 'diffAdded', '-': 'diffRemoved' } as const
+    const TONE = { ' ': undefined, '+': '#0e2705', '-': '#370603' } as const
     const drawCode = () => {
       if (shown.length === 0) return <Text dimColor>(no preview)</Text>
       const isDiff = focus?.view?.mode === 'diff'
@@ -1178,8 +1178,8 @@ export const register: Register = (on, options) => {
                   <Text dimColor> lines read   </Text>
                   <Text color="warning">▌</Text>
                   <Text dimColor> lines changed   </Text>
-                  <Text bold backgroundColor="diffAddedWord">{' +N '}</Text>
-                  <Text bold backgroundColor="diffRemovedWord">{' −M '}</Text>
+                  <Text bold backgroundColor="#1d460f">{' +N '}</Text>
+                  <Text bold backgroundColor="#540d06">{' −M '}</Text>
                 </Text>
                 <Text dimColor wrap="wrap">p pin · f follow live · j/k scroll · /follow clear</Text>
               </Box>

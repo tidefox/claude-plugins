@@ -498,8 +498,8 @@ export const register: Register = (on, options) => {
     const fails = (pr: WatchedPr) => count(pr.checks, 'fail') + count(pr.checks, 'cancel')
     const tally = (pr: WatchedPr) => (
       <Text>
-        <Text bold backgroundColor="diffAddedWord">{` ✓${count(pr.checks, 'pass')} `}</Text>
-        <Text bold backgroundColor="diffRemovedWord">{` ✗${fails(pr)} `}</Text>
+        <Text bold backgroundColor="#1d460f">{` ✓${count(pr.checks, 'pass')} `}</Text>
+        <Text bold backgroundColor="#540d06">{` ✗${fails(pr)} `}</Text>
         <Text bold color="warning">{` ●${count(pr.checks, 'pending')} `}</Text>
       </Text>
     )
@@ -668,8 +668,8 @@ export const register: Register = (on, options) => {
               <Text color="error">━</Text>
               <Text color="warning">╍╍</Text>
               <Text dimColor> the checks so far   </Text>
-              <Text bold backgroundColor="diffAddedWord">{' ✓N '}</Text>
-              <Text bold backgroundColor="diffRemovedWord">{' ✗M '}</Text>
+              <Text bold backgroundColor="#1d460f">{' ✓N '}</Text>
+              <Text bold backgroundColor="#540d06">{' ✗M '}</Text>
             </Text>
             <Text dimColor wrap="wrap">click a PR to pin it · f follow live · u refresh · /ci clear</Text>
           </Box>
@@ -795,7 +795,7 @@ export const register: Register = (on, options) => {
         <Text bold color="claude">CI #{pr.number}</Text>
         {pr.checks.length > 0 && <Text dimColor>{done}/{pr.checks.length}</Text>}
         <Text dimColor wrap="truncate-end">{pr.title}</Text>
-        {fails > 0 && <Text bold backgroundColor="diffRemovedWord">{` ✗${fails} `}</Text>}
+        {fails > 0 && <Text bold backgroundColor="#540d06">{` ✗${fails} `}</Text>}
         <Button key="ci-open" label="details" plain hotkey="c" onPress={() => openPane($)} />
       </Box>
     )
