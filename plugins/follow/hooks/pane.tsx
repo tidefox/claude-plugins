@@ -26,6 +26,9 @@ async function theme($: EngineInterface): Promise<string> {
   return settings.theme
 }
 
+/** A terminal's prompt, drawn before the command and again after its output. */
+const PROMPT = '$ '
+
 /** The code window's fill: a shade dimmer than the terminal's, by theme, unless set in /config. */
 async function codeBackground($: EngineInterface): Promise<string | undefined> {
   if (settings.codeBackground === 'none') return undefined
@@ -162,10 +165,12 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
   } else if (focus?.view?.mode === 'output') {
     const view = focus.view
     // The tail is what a command's output is usually read for: start at the end.
-    const room = fit([{ old: 0, new: view.lines.length }], 2)
-    codeRows = wrapOnce(view.lines, room, () => view.lines.map((text, i) => ({ text, t: ' ' as const, old: i + 1, new: i + 1 })))
+    // A terminal has no gutter: the command after a prompt, its output, then the prompt waiting again.
+    gutter = 0
+    const room = Math.max(8, inner - 1)
+    codeRows = wrapOnce(view, room, () => [`${PROMPT}${view.command}`, ...view.lines, PROMPT].map((text, i) => ({ text, t: ' ' as const, old: i, new: i })))
     codeAuto = Math.max(0, codeRows.length - layout.codeRows)
-    place = (from, to) => `output lines ${from.new}–${to.new} of ${view.lines.length}${view.isCut ? ' (cut)' : ''}${view.isFailed ? ' · interrupted' : ''}`
+    place = (from, to) => `output lines ${Math.max(1, from.new)}–${Math.min(to.new, view.lines.length)} of ${view.lines.length}${view.isCut ? ' (cut)' : ''}${view.isFailed ? ' · interrupted' : ''}`
   } else if (focus?.path) {
     const whole = await fileLines($, focus.path)
     const view = focus.view?.mode === 'source' ? focus.view : null
@@ -194,6 +199,26 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
   const TONE = { ' ': undefined, '+': '#0e2705', '-': '#370603' } as const
   const drawCode = () => {
     if (shown.length === 0) return <Text dimColor>(no preview)</Text>
+    if (focus?.view?.mode === 'output') {
+      const end = focus.view.lines.length + 1
+      return (
+        <Box flexDirection="column">
+          {shown.map((row, i) => {
+            const isPrompt = row.new === 0 || row.new === end
+            if (!isPrompt) return <Text key={`t:${top + i}`} wrap="truncate-end">{row.text || ' '}</Text>
+            // Only a prompt's first row carries the `$`; a wrapped command goes on beneath it.
+            const isFirst = row.part === 0
+            return (
+              <Text key={`t:${top + i}`} wrap="truncate-end" bold={row.new === 0}>
+                {isFirst ? <Text bold color="success">{PROMPT.trim()} </Text> : ''}
+                {isFirst ? row.text.slice(PROMPT.length) : row.text}
+                {row.new === end ? <Text inverse> </Text> : ''}
+              </Text>
+            )
+          })}
+        </Box>
+      )
+    }
     const isDiff = focus?.view?.mode === 'diff'
     const mark = focus?.kind === 'read' ? '│' : '▌'
     const markColor = focus?.kind === 'read' ? 'suggestion' : 'warning'

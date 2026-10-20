@@ -319,8 +319,9 @@ test('shows what a command printed in the code window', async ($, on) => {
 
   const ui = await $.ui.mount({ plugin: 'follow', surface: 'terminal', component: 'Pane', requestId: 'follow', props: props() })
   await ui.drawn()
-  const code = await ui.find({ type: 'Code' })
-  expect(String(code?.props.source)).toBe('On branch main\nnothing to commit\nwarning: x')
+  expect(await ui.find({ type: 'Text', text: /On branch main/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /git status/ })).toBeDefined()
+  expect(await ui.find({ type: 'Code' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /output lines 1–3 of 3/ })).toBeDefined()
   await ui.unmount()
 })
