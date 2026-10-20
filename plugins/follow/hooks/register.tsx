@@ -912,8 +912,8 @@ export const register: Register = (on, options) => {
       ) : (
         <Text>
           {' '}
-          <Text bold backgroundColor="diffAdded">{` +${added} `}</Text>
-          <Text bold backgroundColor="diffRemoved">{` −${removed} `}</Text>
+          <Text bold backgroundColor="diffAddedWord">{` +${added} `}</Text>
+          <Text bold backgroundColor="diffRemovedWord">{` −${removed} `}</Text>
         </Text>
       )
     const statWidth = (added: number | null, removed: number | null) =>
@@ -1178,8 +1178,8 @@ export const register: Register = (on, options) => {
                   <Text dimColor> lines read   </Text>
                   <Text color="warning">▌</Text>
                   <Text dimColor> lines changed   </Text>
-                  <Text bold backgroundColor="diffAdded">{' +N '}</Text>
-                  <Text bold backgroundColor="diffRemoved">{' −M '}</Text>
+                  <Text bold backgroundColor="diffAddedWord">{' +N '}</Text>
+                  <Text bold backgroundColor="diffRemovedWord">{' −M '}</Text>
                 </Text>
                 <Text dimColor wrap="wrap">p pin · f follow live · j/k scroll · /follow clear</Text>
               </Box>
