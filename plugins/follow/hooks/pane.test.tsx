@@ -287,9 +287,9 @@ test('keeps a narrow pane inside its cells: whole kind, short path, wrapped code
   expect(source.length).toBeGreaterThan(3)
   for (const row of source) expect(row.length).toBeLessThanOrEqual(31)
   expect(source.join('')).toBe(['const a = 1', long, 'const b = 2'].join(''))
-  // A wrapped line's further rows carry no number.
+  // A wrapped line's further rows carry a dot in place of a number.
   expect(await ui.find({ type: 'Text', text: '│2 ' })).toBeDefined()
-  expect((await ui.findAll({ type: 'Text', text: '│  ' })).length).toBe(source.length - 3)
+  expect((await ui.findAll({ type: 'Text', text: '│· ' })).length).toBe(source.length - 3)
 
   // Files and Trail rows light whole under the pointer: the drawn tree carries each row Box's hover.
   type Node = { props?: { key?: unknown }; hover?: unknown; children?: unknown[] }

@@ -1177,6 +1177,9 @@ export const register: Register = (on, options) => {
       const mark = focus?.kind === 'read' ? '│' : '▌'
       const markColor = focus?.kind === 'read' ? 'suggestion' : 'warning'
       const num = (n: number, isShown: boolean) => (isShown ? String(n) : '').padStart(digits)
+      // A row with no number still draws a dot: a gutter row of blanks alone can be dropped or misplaced by the renderer,
+      // which sets every number after a wrapped line a row out of step with its code.
+      const cont = () => '·'.padStart(digits)
       // Runs of one tone share a Code, so a diff's rows take their background and a file stays one highlight.
       const runs: CodeRow[][] = []
       for (const row of shown) {
@@ -1187,20 +1190,19 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="row">
           <Box flexDirection="column" flexShrink={0} width={gutter}>
-            {shown.map(row => {
+            {shown.map((row, i) => {
               const isFirst = row.part === 0 && !row.isGap
               if (isDiff) {
                 return (
-                  <Text dimColor={row.t === ' '} backgroundColor={TONE[row.t]}>
-                    {`${num(row.old, isFirst && row.t !== '+')} ${num(row.new, isFirst && row.t !== '-')} ${isFirst ? row.t : ' '} `}
+                  <Text key={`g:${top + i}`} dimColor={row.t === ' '} backgroundColor={TONE[row.t]}>
+                    {`${num(row.old, isFirst && row.t !== '+')} ${num(row.new, isFirst && row.t !== '-')} ${isFirst ? row.t : '·'} `}
                   </Text>
                 )
               }
               const isFocus = isFocusLine(row)
               return (
-                <Text>
-                  <Text color={markColor}>{isFocus ? mark : ' '}</Text>
-                  <Text dimColor={!isFocus} bold={isFocus} color={isFocus ? markColor : undefined}>{`${num(row.new, isFirst)} `}</Text>
+                <Text key={`g:${top + i}`} dimColor={!isFocus} bold={isFocus} color={isFocus ? markColor : undefined}>
+                  {`${isFocus ? mark : ' '}${isFirst ? num(row.new, true) : cont()} `}
                 </Text>
               )
             })}
