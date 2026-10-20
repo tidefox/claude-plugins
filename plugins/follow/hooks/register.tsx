@@ -17,7 +17,7 @@ const HUNK_CONTEXT = 3
 const HUNK_CAP = 400
 const MAX_FILE_CHARS = 4_000_000
 const TRAIL_ROWS = 6
-const FILE_ROWS = 5
+const FILE_ROWS = 6
 /** Rows a wheel tick or j/k moves the code window. */
 const SCROLL_STEP = 3
 
