@@ -1024,25 +1024,38 @@ export const register: Register = (on, options) => {
     const doing = a && (isRunning || t - a.at <= LINGER_MS) ? a : null
     // Subagents at work, by type: `2 agents Explore + general-purpose`, like the model and effort chip.
     const working = (await $.agent.list().catch(() => [])).filter(g => g.status === 'running')
-    if (!doing && working.length === 0) return next(e)
+    if (!doing && working.length === 0 && e.props.modes.length === 0) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const types = [...new Set(working.map(g => g.type))]
     const what = !doing ? '' : doing.path === null ? footerWhat(doing.label) : `${shortenPath(shortPath(doing), 28)}${doing.line ? `:${doing.line}` : ''}`
     const modes = e.props.modes.join(' & ')
+    // Two rows: the labels (CI, subagents) over what the agent is doing.
     return (
-      <Box flexDirection="row" gap={1}>
-        {modes ? <Text dimColor>{modes}</Text> : ''}
-        {working.length > 0 ? (
-          <Text>
-            <Text bold color="claude">{`${working.length} ${working.length === 1 ? 'agent' : 'agents'}`}</Text>
-            <Text dimColor>{` ${clip(types.join(' + '), 28)}`}</Text>
-          </Text>
+      <Box flexDirection="column">
+        {modes || working.length > 0 ? (
+          <Box flexDirection="row" gap={1}>
+            {modes ? <Text dimColor>{modes}</Text> : ''}
+            {working.length > 0 ? (
+              <Text>
+                <Text bold color="claude">{`${working.length} ${working.length === 1 ? 'agent' : 'agents'}`}</Text>
+                <Text dimColor>{` ${clip(types.join(' + '), 28)}`}</Text>
+              </Text>
+            ) : (
+              ''
+            )}
+          </Box>
         ) : (
           ''
         )}
-        {doing ? <Text bold color={BADGE[doing.kind].color}>{BADGE[doing.kind].label.toLowerCase()}</Text> : ''}
-        {doing ? <Text dimColor={!isRunning} wrap="truncate-end">{what}</Text> : ''}
-        {doing && isRunning ? <Text dimColor>{ago(t - doing.at)}</Text> : ''}
+        {doing ? (
+          <Box flexDirection="row" gap={1}>
+            <Text bold color={BADGE[doing.kind].color}>{BADGE[doing.kind].label.toLowerCase()}</Text>
+            <Text dimColor={!isRunning} wrap="truncate-end">{what}</Text>
+            {isRunning ? <Text dimColor>{ago(t - doing.at)}</Text> : ''}
+          </Box>
+        ) : (
+          ''
+        )}
       </Box>
     )
   }).catch(($, e, next) => next(e))
