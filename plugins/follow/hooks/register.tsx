@@ -416,10 +416,44 @@ async function writePlan($: EngineInterface, path: string, label: string, isTool
   }
 }
 
+const GIT_STATS = 300
+const GIT_TEXTS = 50
+const GIT_SHOWN = 20
+/** A command that only looks: no tree to compare around it. */
+const LOOKS_ONLY = /^\s*(?:ls|cat|echo|pwd|grep|rg|head|tail|wc|which|date|stat|file|tree|du|df)\b/
+
+type Tree = { root: string; stats: Map<string, string> }
+
+/** The repo's uncommitted files (git status) as a size and mtime each; null outside a repo. */
+async function treeState($: EngineInterface, here: string): Promise<Tree | null> {
+  try {
+    const top = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd: here, timeoutMs: 3000 })
+    if (top.exitCode !== 0) return null
+    const root = top.stdout.trim()
+    const status = await $.process.run(['git', 'status', '--porcelain', '-z', '--untracked-files=all'], { cwd: root, timeoutMs: 5000 })
+    if (status.exitCode !== 0) return null
+    const entries = status.stdout.split('\0')
+    const stats = new Map<string, string>()
+    for (let i = 0; i < entries.length && stats.size < GIT_STATS; i++) {
+      const entry = entries[i]!
+      if (entry.length < 4) continue
+      // A rename names its old path in the entry after it.
+      if (entry[0] === 'R' || entry[0] === 'C') i++
+      const path = `${root}/${entry.slice(3)}`
+      const stat = await $.fs.stat(path).catch(() => null)
+      stats.set(path, stat ? `${stat.size}:${stat.mtimeMs}` : 'gone')
+    }
+    return { root, stats }
+  } catch {
+    return null
+  }
+}
+
 /**
  * Any other command (a script, `sed -i`, `perl -pi`, a formatter) may change the
- * files it names: each is read before it runs and diffed after, and the ones that
- * changed are the call's edits.
+ * files it names, or files it finds for itself: each named file is read before
+ * it runs and diffed after, and so is every file git sees change around it.
+ * The ones that changed are the call's edits.
  */
 async function shellPlan($: EngineInterface, command: string, here: string): Promise<Plan> {
   const dir = shellDir(command)
@@ -429,25 +463,110 @@ async function shellPlan($: EngineInterface, command: string, here: string): Pro
     .map(path => absolute(path, dir ? absolute(dir, here) : here))
   const before = new Map<string, string | null>()
   for (const path of paths) before.set(path, await readText($, path))
+
+  const cwd = dir ? absolute(dir, here) : here
+  const treeBefore = LOOKS_ONLY.test(command) ? null : await treeState($, cwd)
+  const dirty = new Map<string, string | null>()
+  if (treeBefore) {
+    for (const path of [...treeBefore.stats.keys()].slice(0, GIT_TEXTS)) if (!before.has(path)) dirty.set(path, await readText($, path))
+  }
+
   return {
     activity: base('shell', command),
     after: async () => {
       const changed: Found[] = []
-      for (const [path, was] of before) {
-        const now = await readText($, path)
-        if (now === null || now === was) continue
+      const record = (path: string, was: string | null, now: string | null) => {
+        if (now === null || now === was) return
         if (was === null) {
           const lines = splitLines(now)
           changed.push({ ...base('write', command, path), line: 1, endLine: lines.length, added: lines.length, removed: 0, view: sourceView(path, lines, 1, 0, 0, READ_WINDOW) })
-          continue
+          return
         }
         const view = diffView(path, was, now)
         if (view?.mode === 'diff') changed.push({ ...base('edit', command, path), endLine: null, ...diffFields(view) })
+      }
+      for (const [path, was] of before) record(path, was, await readText($, path))
+
+      const treeAfter = treeBefore ? await treeState($, cwd) : null
+      if (treeBefore && treeAfter) {
+        const candidates = new Set([...treeBefore.stats.keys(), ...treeAfter.stats.keys()])
+        for (const path of candidates) {
+          if (changed.length >= GIT_SHOWN) break
+          if (before.has(path) || treeBefore.stats.get(path) === treeAfter.stats.get(path)) continue
+          let was: string | null
+          if (dirty.has(path)) was = dirty.get(path)!
+          else if (treeBefore.stats.has(path)) continue
+          else {
+            // Clean before: the committed file is what it was; absent from HEAD, it is new.
+            const shown = await $.process.run(['git', 'show', `HEAD:${path.slice(treeBefore.root.length + 1)}`], { cwd: treeBefore.root, timeoutMs: 5000 }).catch(() => null)
+            was = shown && shown.exitCode === 0 && !shown.isStdoutTruncated ? shown.stdout : null
+          }
+          record(path, was, await readText($, path))
+        }
       }
       const [first, ...more] = changed
       return first ? { ...first, more } : {}
     },
   }
+}
+
+const GREP_FILES = 6
+
+/** The text a Grep result carries: a string, a `{ content | filenames }` object, or text blocks. */
+function resultText(ran: ToolCallResult): string {
+  const r = ran.result as unknown
+  if (typeof r === 'string') return r
+  if (Array.isArray(r)) return r.map(b => (typeof b === 'string' ? b : String((b as { text?: string })?.text ?? ''))).join('\n')
+  if (r && typeof r === 'object') {
+    const o = r as { content?: unknown; filenames?: unknown }
+    if (typeof o.content === 'string' && o.content) return o.content
+    if (Array.isArray(o.filenames)) return o.filenames.join('\n')
+  }
+  return ''
+}
+
+/** The files a Grep matched, each with the first matching line (null where the result names only files). */
+export function grepFiles(text: string): { path: string; line: number | null }[] {
+  const hits = new Map<string, number | null>()
+  for (const raw of text.split('\n')) {
+    const row = raw.trimEnd()
+    const withLine = /^(.+?):(\d+):/.exec(row)
+    if (withLine) {
+      if (!hits.has(withLine[1]!)) hits.set(withLine[1]!, Number(withLine[2]))
+      continue
+    }
+    const counted = /^(.+):\d+$/.exec(row)
+    const path = counted ? counted[1]! : row
+    // A path, not a header (`Found 3 files`) or a context line.
+    if (/^(?:\/|\.\/|[\w@.-]+\/)\S*$/.test(path) && !/-\d+-/.test(path) && !hits.has(path)) hits.set(path, null)
+  }
+  return [...hits].map(([path, line]) => ({ path, line }))
+}
+
+/** Where a Grep matched: the first match's file and window on the call, each further file an activity of its own. */
+async function grepHits($: EngineInterface, ran: ToolCallResult, pattern: string, here: string, label: string): Promise<Partial<Activity> & { more?: Found[] }> {
+  const all = grepFiles(resultText(ran))
+  if (all.length === 0) return {}
+  let finder: RegExp | null = null
+  try {
+    finder = new RegExp(pattern, 'i')
+  } catch {}
+  const found: Found[] = []
+  for (const hit of all.slice(0, GREP_FILES)) {
+    const path = absolute(expandHome(hit.path), here)
+    const text = await readText($, path)
+    if (text === null) continue
+    const lines = splitLines(text)
+    let line = hit.line ?? 1
+    if (hit.line === null && finder) {
+      const at = lines.findIndex(l => finder!.test(l))
+      if (at >= 0) line = at + 1
+    }
+    found.push({ ...base('search', label, path), line, endLine: line, view: sourceView(path, lines, line, line, 3, READ_WINDOW) })
+  }
+  const note = `${label}  (${all.length} file${all.length === 1 ? '' : 's'})`
+  const [first, ...more] = found
+  return first ? { ...first, label: note, more } : { label: note }
 }
 
 async function plan($: EngineInterface, e: ToolCallInput, here: string): Promise<Plan> {
@@ -491,7 +610,9 @@ async function plan($: EngineInterface, e: ToolCallInput, here: string): Promise
   }
   if (tool === 'Grep' || tool === 'Glob') {
     const args = e as unknown as { pattern?: string; path?: string }
-    return { activity: base('search', `${args.pattern ?? ''}${args.path ? `  in ${args.path}` : ''}`) }
+    const label = `${args.pattern ?? ''}${args.path ? `  in ${args.path}` : ''}`
+    if (tool === 'Glob') return { activity: base('search', label) }
+    return { activity: base('search', label), after: ran => grepHits($, ran, args.pattern ?? '', here, label) }
   }
   if (e.tool === 'TodoWrite') {
     const doing = e.todos.find(t => t.status === 'in_progress')

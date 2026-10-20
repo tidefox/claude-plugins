@@ -9,6 +9,7 @@ import {
   codeLayout,
   diffRows,
   expandTabs,
+  grepFiles,
   isScratchPath,
   lineOf,
   namedPaths,
@@ -222,4 +223,16 @@ test('sizes and places the scrollbar thumb', async () => {
   expect(thumb(0, 100, 20)).toEqual({ from: 0, size: 4 })
   expect(thumb(80, 100, 20)).toEqual({ from: 16, size: 4 })
   expect(thumb(40, 100, 20)).toEqual({ from: 8, size: 4 })
+})
+
+test('reads the files a Grep matched, with the first matching line', () => {
+  expect(grepFiles('src/a.ts:12:const x\nsrc/a.ts:30:const y\nsrc/b.ts-9-ctx\nsrc/c.ts:4:z')).toEqual([
+    { path: 'src/a.ts', line: 12 },
+    { path: 'src/c.ts', line: 4 },
+  ])
+  expect(grepFiles('Found 2 files\nsrc/a.ts\n/abs/b.ts')).toEqual([
+    { path: 'src/a.ts', line: null },
+    { path: '/abs/b.ts', line: null },
+  ])
+  expect(grepFiles('src/a.ts:3')).toEqual([{ path: 'src/a.ts', line: null }])
 })
