@@ -15,6 +15,12 @@ const READ_WINDOW = 120
 const EDIT_CONTEXT = 12
 const HUNK_CONTEXT = 3
 const HUNK_CAP = 400
+const OUTPUT_LINES = 400
+/** The age column: `12s`, `3m`, `held`, padded so a row's chips never move as it ticks. */
+const AGE = 4
+/** The header's chip (`◎ SCROLLED`) and action (`⟲ follow live`) slots, each as wide as its widest content. */
+const CHIP = 10
+const ACTION = 17
 const MAX_FILE_CHARS = 4_000_000
 const TRAIL_ROWS = 6
 const FILE_ROWS = 6
@@ -425,6 +431,21 @@ async function writePlan($: EngineInterface, path: string, label: string, isTool
   }
 }
 
+/** What a command printed (stdout, then stderr), as a view the code window can scroll; null when it printed nothing. */
+function outputView(command: string, ran: ToolCallResult): FileView | null {
+  const r = ran.result as { stdout?: unknown; stderr?: unknown; interrupted?: unknown } | null | undefined
+  const text = [r?.stdout, r?.stderr].filter((t): t is string => typeof t === 'string' && t.trim() !== '').map(t => t.replace(/\n+$/, '')).join('\n')
+  if (text === '') return null
+  const lines = splitLines(text).map(clean)
+  return {
+    mode: 'output',
+    command: oneLine(command),
+    lines: lines.slice(0, OUTPUT_LINES),
+    isCut: lines.length > OUTPUT_LINES,
+    isFailed: r?.interrupted === true,
+  }
+}
+
 const GIT_STATS = 300
 const GIT_TEXTS = 50
 const GIT_SHOWN = 20
@@ -482,7 +503,7 @@ async function shellPlan($: EngineInterface, command: string, here: string): Pro
 
   return {
     activity: base('shell', command),
-    after: async () => {
+    after: async ran => {
       const changed: Found[] = []
       const record = (path: string, was: string | null, now: string | null) => {
         if (now === null || now === was) return
@@ -514,7 +535,9 @@ async function shellPlan($: EngineInterface, command: string, here: string): Pro
         }
       }
       const [first, ...more] = changed
-      return first ? { ...first, more } : {}
+      if (first) return { ...first, more }
+      const view = outputView(command, ran)
+      return view ? { view } : {}
     },
   }
 }
@@ -1045,7 +1068,7 @@ export const register: Register = (on, options) => {
             )}
           </Box>
         ) : (
-          ''
+          <Text> </Text>
         )}
         {doing ? (
           <Box flexDirection="row" gap={1} justifyContent="flex-end">
@@ -1054,7 +1077,7 @@ export const register: Register = (on, options) => {
             {isRunning ? <Text dimColor>{ago(t - doing.at)}</Text> : ''}
           </Box>
         ) : (
-          ''
+          <Text> </Text>
         )}
       </Box>
     )
@@ -1112,6 +1135,7 @@ export const register: Register = (on, options) => {
     const statWidth = (added: number | null, removed: number | null) =>
       added == null || removed == null ? 0 : `${added}${removed}`.length + 7
     const mark = (a: Activity) => (a.phase === 'running' ? '…' : a.phase === 'error' ? '✗' : a.isHeld ? 'held' : '')
+    const age = (a: Activity) => (mark(a) || ago(t - a.at)).padStart(AGE)
 
     // A fixed layout as tall as the body: the code window takes what the header,
     // Files and Trail leave, and scrolls inside itself while they stay put.
@@ -1145,6 +1169,13 @@ export const register: Register = (on, options) => {
       codeRows = wrapOnce(view.hunk, room, () => diff)
       codeAuto = Math.max(0, codeRows.findIndex(r => r.t !== ' ') - HUNK_CONTEXT)
       place = (from, to) => `diff lines ${from.line + 1}–${to.line + 1} of ${diff.length}${view.isCut ? ' (cut)' : ''}`
+    } else if (focus?.view?.mode === 'output') {
+      const view = focus.view
+      // The tail is what a command's output is usually read for: start at the end.
+      const room = fit([{ old: 0, new: view.lines.length }], 2)
+      codeRows = wrapOnce(view.lines, room, () => view.lines.map((text, i) => ({ text, t: ' ' as const, old: i + 1, new: i + 1 })))
+      codeAuto = Math.max(0, codeRows.length - layout.codeRows)
+      place = (from, to) => `output lines ${from.new}–${to.new} of ${view.lines.length}${view.isCut ? ' (cut)' : ''}${view.isFailed ? ' · interrupted' : ''}`
     } else if (focus?.path) {
       const whole = await fileLines($, focus.path)
       const view = focus.view?.mode === 'source' ? focus.view : null
@@ -1286,9 +1317,9 @@ export const register: Register = (on, options) => {
     const totalAdded = files.reduce((n, f) => n + (f.added ?? 0), 0)
     const totalRemoved = files.reduce((n, f) => n + (f.removed ?? 0), 0)
     const kindName = focus ? BADGE[focus.kind].label.charAt(0) + BADGE[focus.kind].label.slice(1).toLowerCase() : ''
-    const focusAge = focus ? mark(focus) || ago(t - focus.at) : ''
+    const focusAge = focus ? age(focus) : ''
     const focusRoom = focus
-      ? inner - cellWidth(kindName) - (focus.isScratch ? 8 : 0) - 1 - statWidth(focus.added, focus.removed) - 1 - cellWidth(focusAge)
+      ? inner - cellWidth(kindName) - (focus.isScratch ? 8 : 0) - 1 - statWidth(focus.added, focus.removed) - 1 - AGE
       : 0
     const hover = await rowHover($)
 
@@ -1301,13 +1332,18 @@ export const register: Register = (on, options) => {
               <Text dimColor>  {who}</Text>
             </Text>
           </Box>
+          {/* Both slots keep their width whatever they hold, so the header never shifts. */}
           <Box flexDirection="row" gap={1} flexShrink={0}>
-            <Text bold color={chip.color}>{chip.text}</Text>
-            {isLive ? (
-              focus ? <Button key="pin" label="pin" hotkey="p" onPress={() => update($, pinned, () => focus.id)} /> : ''
-            ) : (
-              <Button key="live" label="⟲ follow live" variant="primary" hotkey="f" onPress={followLive} />
-            )}
+            <Box width={CHIP} flexShrink={0}>
+              <Text bold color={chip.color}>{chip.text}</Text>
+            </Box>
+            <Box width={ACTION} flexShrink={0} justifyContent="flex-end">
+              {isLive ? (
+                focus ? <Button key="pin" label="pin" hotkey="p" onPress={() => update($, pinned, () => focus.id)} /> : ''
+              ) : (
+                <Button key="live" label="⟲ follow live" variant="primary" hotkey="f" onPress={followLive} />
+              )}
+            </Box>
           </Box>
         </Box>
 
@@ -1334,31 +1370,28 @@ export const register: Register = (on, options) => {
               <Box flexDirection="row" height={1}>
                 <Box flexGrow={1} flexShrink={1}>
                   <Text dimColor wrap="truncate-end">
-                    {focus.isHeld ? 'held for review: the file is unchanged' : focus.tool === 'Bash' ? `$ ${oneLine(focus.label)}` : where}
+                    {focus.isHeld ? 'held for review: the file is unchanged' : focus.tool === 'Bash' && focus.view?.mode !== 'output' ? `$ ${oneLine(focus.label)}` : where}
                   </Text>
                 </Box>
-                {maxTop > 0 ? (
-                  <Box flexShrink={0}>
-                    <Text dimColor>{` ${Math.round((top / maxTop) * 100)}%`}</Text>
-                  </Box>
-                ) : (
-                  ''
-                )}
+                <Box flexShrink={0} width={5} justifyContent="flex-end">
+                  <Text dimColor>{maxTop > 0 ? `${Math.round((top / maxTop) * 100)}%` : ''}</Text>
+                </Box>
               </Box>
               <Box key="code" flexDirection="row" height={layout.codeRows} overflow="hidden">
                 <Box flexDirection="column" flexGrow={1} flexShrink={1} overflow="hidden">
                   {drawCode() as never}
                 </Box>
-                {maxTop > 0 ? (
-                  <Box flexDirection="column" flexShrink={0}>
-                    {Array.from({ length: layout.codeRows }, (_, i) => {
-                      const isThumb = i >= grip.from && i < grip.from + grip.size
-                      return <Text color={isThumb ? 'claude' : 'subtle'}>{isThumb ? '┃' : '│'}</Text>
-                    })}
-                  </Box>
-                ) : (
-                  ''
-                )}
+                {/* The scrollbar's column stays, blank when nothing scrolls: the code never changes width. */}
+                <Box flexDirection="column" flexShrink={0} width={1}>
+                  {Array.from({ length: layout.codeRows }, (_, i) => {
+                    const isThumb = i >= grip.from && i < grip.from + grip.size
+                    return (
+                      <Text key={`bar:${i}`} color={isThumb ? 'claude' : 'subtle'}>
+                        {maxTop === 0 ? ' ' : isThumb ? '┃' : '│'}
+                      </Text>
+                    )
+                  })}
+                </Box>
               </Box>
             </Box>,
           )
@@ -1438,11 +1471,10 @@ export const register: Register = (on, options) => {
             {heading('Trail', pool.length > trailRows ? `${span(trailTop, pool.length, trailRows)} · newest first` : 'newest first')}
             {pool.length === 0 ? <Text dimColor>· waiting for the first tool call…</Text> : ''}
             {pool.slice(trailTop, trailTop + trailRows).map(a => {
-              const age = mark(a) || ago(t - a.at)
               const isFocus = a.id === focus?.id
               const isQuiet = !isChange(a.kind) && !isFocus
               // ▸, the kind padded to six and a space; the chips, a space and the age on the right.
-              const room = inner - 8 - statWidth(a.added, a.removed) - 1 - cellWidth(age)
+              const room = inner - 8 - statWidth(a.added, a.removed) - 1 - AGE
               return (
                 <Box key={`t:${a.id}`} flexDirection="row" height={1} hover={{ backgroundColor: hover }}>
                   <Box flexGrow={1} flexShrink={1}>
@@ -1456,7 +1488,7 @@ export const register: Register = (on, options) => {
                   </Box>
                   <Box flexShrink={0}>
                     {stat(a.added, a.removed)}
-                    <Text dimColor>{` ${age}`}</Text>
+                    <Text dimColor>{` ${age(a)}`}</Text>
                   </Box>
                 </Box>
               )
@@ -1465,11 +1497,11 @@ export const register: Register = (on, options) => {
         )}
 
         <Box flexDirection="row" height={1} gap={1} marginTop={0}>
-          {maxTop > 0 ? <Button key="up" label="↑" hotkey="k" onPress={() => scrollCode($, -SCROLL_STEP)} /> : ''}
-          {maxTop > 0 ? <Button key="down" label="↓" hotkey="j" onPress={() => scrollCode($, SCROLL_STEP)} /> : ''}
-          {maxTop > 0 ? <Button key="top" label="top" hotkey="t" onPress={() => scrollCode($, -codeTotal)} /> : ''}
-          {maxTop > 0 ? <Button key="end" label="end" hotkey="e" onPress={() => scrollCode($, codeTotal)} /> : ''}
-          {nvimServer && focus?.path ? <Button key="nvim" label="nvim" hotkey="n" onPress={() => mirror($, focus)} /> : ''}
+          <Button key="up" label="↑" hotkey="k" onPress={() => scrollCode($, -SCROLL_STEP)} />
+          <Button key="down" label="↓" hotkey="j" onPress={() => scrollCode($, SCROLL_STEP)} />
+          <Button key="top" label="top" hotkey="t" onPress={() => scrollCode($, -codeTotal)} />
+          <Button key="end" label="end" hotkey="e" onPress={() => scrollCode($, codeTotal)} />
+          {nvimServer ? <Button key="nvim" label="nvim" hotkey="n" onPress={() => (focus ? mirror($, focus) : undefined)} /> : ''}
           {/* The row's free right side: what the whole session has touched. */}
           <Box flexGrow={1} flexShrink={1} justifyContent="flex-end">
             {files.length > 0 ? (

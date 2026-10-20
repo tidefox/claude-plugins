@@ -304,3 +304,23 @@ test('keeps a narrow pane inside its cells: whole kind, short path, wrapped code
   expect(lit).toEqual([{ backgroundColor: '#303030' }, { backgroundColor: '#303030' }])
   await ui.unmount()
 })
+
+test('shows what a command printed in the code window', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-20T10:00:00Z') })
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('session.cwd', () => ({ value: '/work/app' }) as never)
+  on('session.root', () => ({ value: '/work/app' }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('tool.call', () => ({ result: { stdout: 'On branch main\nnothing to commit\n', stderr: 'warning: x\n', interrupted: false } as never, text: 'ok' }))
+
+  await $.tool.call({ tool: 'Bash', command: 'git status' })
+
+  const ui = await $.ui.mount({ plugin: 'follow', surface: 'terminal', component: 'Pane', requestId: 'follow', props: props() })
+  await ui.drawn()
+  const code = await ui.find({ type: 'Code' })
+  expect(String(code?.props.source)).toBe('On branch main\nnothing to commit\nwarning: x')
+  expect(await ui.find({ type: 'Text', text: /output lines 1–3 of 3/ })).toBeDefined()
+  await ui.unmount()
+})

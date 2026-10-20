@@ -13,7 +13,10 @@ export type SourceView = {
 /** One unified-diff hunk (header included) of what an edit or write changed. */
 export type DiffView = { mode: 'diff'; path: string; hunk: string; line: number; isCut: boolean; added: number; removed: number }
 
-export type FileView = SourceView | DiffView
+/** What a shell command printed: stdout, then stderr, `isCut` when only the first lines are kept. */
+export type OutputView = { mode: 'output'; command: string; lines: string[]; isCut: boolean; isFailed: boolean }
+
+export type FileView = SourceView | DiffView | OutputView
 
 export type Activity = {
   /** The tool_use_id. */
