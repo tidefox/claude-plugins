@@ -24,6 +24,8 @@ const SCROLL_STEP = 3
 const activities = atom({ plugin: 'follow', key: 'activities' } as const, [])
 const pinned = atom({ plugin: 'follow', key: 'pinned' } as const, null)
 const scroll = atom({ plugin: 'follow', key: 'scroll' } as const, null)
+/** How far the person scrolled the Files and Trail lists, in rows from the newest. */
+const lists = atom({ plugin: 'follow', key: 'lists' } as const, { files: 0, trail: 0 })
 
 const BADGE: Record<ActivityKind, { label: string; color: string }> = {
   read: { label: 'READ', color: 'suggestion' },
@@ -838,6 +840,18 @@ async function scrollCode($: EngineInterface, by: number) {
   await update($, scroll, () => ({ id: at.id, top }))
 }
 
+/** Where Files and Trail last drew (their rows from the pane's top), so the wheel over one scrolls that list. */
+let drawnLists: { name: 'files' | 'trail'; from: number; rows: number; top: number; maxTop: number }[] = []
+
+async function scrollList($: EngineInterface, name: 'files' | 'trail', by: number) {
+  const at = drawnLists.find(l => l.name === name)
+  if (!at) return
+  const top = Math.min(at.maxTop, Math.max(0, at.top + by))
+  if (top === at.top) return
+  at.top = top
+  await update($, lists, cur => ({ ...cur, [name]: top }))
+}
+
 const escapeVim = (path: string) => path.replace(/([ \\%#|"'])/g, '\\$1').replace(/</g, '<lt>')
 
 async function mirror($: EngineInterface, a: Activity) {
@@ -867,6 +881,7 @@ async function reset($: EngineInterface) {
   await update($, activities, () => [])
   await update($, pinned, () => null)
   await update($, scroll, () => null)
+  await update($, lists, () => ({ files: 0, trail: 0 }))
   $.ui.status(undefined)
 }
 
@@ -996,6 +1011,7 @@ export const register: Register = (on, options) => {
     // Only an activity id still in the trail pins; anything else follows live.
     const pin = typeof stored === 'string' && list.some(a => a.id === stored) ? stored : null
     const scrolled = await read($, scroll)
+    const listTops = await read($, lists)
     const t = await $.clock.now()
     const width = Math.max(24, e.props.bodyColumns)
     const viewed = e.props.view.agentId ?? null
@@ -1165,6 +1181,19 @@ export const register: Register = (on, options) => {
       }
     }
 
+    const filesMax = Math.max(0, files.length - fileRows)
+    const trailMax = Math.max(0, pool.length - trailRows)
+    const filesTop = Math.min(filesMax, Math.max(0, listTops.files))
+    const trailTop = Math.min(trailMax, Math.max(0, listTops.trail))
+    // Rows from the pane's top: the code block ends at codeTop + codeRows, each list is a gap, a heading and its rows.
+    const filesFrom = layout.codeTop + layout.codeRows + 1
+    const trailFrom = filesFrom + 2 + fileRows
+    drawnLists = [
+      { name: 'files', from: filesFrom, rows: 1 + fileRows, top: filesTop, maxTop: filesMax },
+      { name: 'trail', from: trailFrom, rows: 1 + trailRows, top: trailTop, maxTop: trailMax },
+    ]
+    const span = (top: number, total: number, rows: number) => (total > rows ? `${top + 1}–${Math.min(total, top + rows)} of ${total}` : String(total))
+
     const followLive = () => Promise.all([update($, pinned, () => null), update($, scroll, () => null)])
     const panel = await codeBackground($)
     const isLive = pin === null && !isScrolled
@@ -1315,9 +1344,9 @@ export const register: Register = (on, options) => {
           'subtle',
           fileRows + 1,
           <Box flexDirection="column">
-            {heading('Files', files.length > fileRows ? `${fileRows} of ${files.length}` : String(files.length))}
+            {heading('Files', span(filesTop, files.length, fileRows))}
             {files.length === 0 ? <Text dimColor>○ none yet</Text> : ''}
-            {files.slice(0, fileRows).map(f => {
+            {files.slice(filesTop, filesTop + fileRows).map(f => {
               const isChanged = f.letters.has('E') || f.letters.has('W')
               const isScratch = isScratchPath(f.path)
               // ● and a space, the ✎, then the chips or ` read` on the right.
@@ -1346,9 +1375,9 @@ export const register: Register = (on, options) => {
           'subtle',
           trailRows + 1,
           <Box flexDirection="column">
-            {heading('Trail', 'newest first')}
+            {heading('Trail', pool.length > trailRows ? `${span(trailTop, pool.length, trailRows)} · newest first` : 'newest first')}
             {pool.length === 0 ? <Text dimColor>· waiting for the first tool call…</Text> : ''}
-            {pool.slice(0, trailRows).map(a => {
+            {pool.slice(trailTop, trailTop + trailRows).map(a => {
               const age = mark(a) || ago(t - a.at)
               const isFocus = a.id === focus?.id
               const isQuiet = !isChange(a.kind) && !isFocus
@@ -1389,8 +1418,14 @@ export const register: Register = (on, options) => {
   // The wheel over the code window scrolls the code, not the pane: the layout is fixed.
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     const at = drawn
-    if (e.origin.kind !== 'person' || at === null || e.by === 0) return next(e)
+    if (e.origin.kind !== 'person' || e.by === 0) return next(e)
     const row = e.pointer?.row
+    const list = row === undefined ? undefined : drawnLists.find(l => row >= l.from && row < l.from + l.rows)
+    if (list) {
+      await scrollList($, list.name, Math.sign(e.by))
+      return next({ ...e, offset: Math.max(0, e.offset - e.by) })
+    }
+    if (at === null) return next(e)
     if (row !== undefined && (row < at.codeTop || row >= at.codeTop + at.codeRows)) return next(e)
     // A page key asks for the body's height: page the code window instead.
     const by = row === undefined && Math.abs(e.by) >= e.bodyRows ? Math.sign(e.by) * at.codeRows : e.by
