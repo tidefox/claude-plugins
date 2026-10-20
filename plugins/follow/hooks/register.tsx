@@ -38,6 +38,13 @@ const BADGE: Record<ActivityKind, { label: string; color: string }> = {
   agent: { label: 'AGENT', color: 'claude' },
   other: { label: 'TOOL', color: 'inactive' },
 }
+/** How long a finished call stays in the footer. */
+const LINGER_MS = 8000
+/** A command as the footer names it: its program and first word after, past `VAR=x` and `cd dir &&`. */
+export function footerWhat(label: string): string {
+  const words = oneLine(label.replace(/^.*?&&\s*/, '')).split(' ').filter(w => !/^\w+=/.test(w))
+  return clip(words.slice(0, 2).join(' '), 24)
+}
 const LETTER: Partial<Record<ActivityKind, string>> = { read: 'R', edit: 'E', write: 'W' }
 
 // ── pure helpers (exported for the tests) ──────────────────────────────────
@@ -926,7 +933,11 @@ export const register: Register = (on, options) => {
 
   // The status line names what the agent is doing; once the turn ends it is doing nothing.
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) $.ui.status(undefined)
+    if (e.agentId === undefined) {
+      // Redraw the footer now, and again once the finished call's linger has run out.
+      $.ui.invalidate('ui.render')
+      $.clock.after(LINGER_MS + 500, () => $.ui.invalidate('ui.render'))
+    }
     return next(e)
   })
 
@@ -975,7 +986,6 @@ export const register: Register = (on, options) => {
     const keep = await read($, pinned)
     await update($, activities, list => trim([activity, ...list.filter(a => a.id !== activity.id)], keep))
     if (keep === null) void mirror($, activity)
-    if (activity.kind !== 'other') $.ui.status(`◉ ${BADGE[activity.kind].label.toLowerCase()} ${fitActivity(activity, 48)}`)
 
     const settle = (extra: Partial<Activity>, phase: Activity['phase']) =>
       update($, activities, list => list.map((a): Activity => (a.id === activity.id ? { ...a, ...extra, phase } : a)))
@@ -1002,6 +1012,39 @@ export const register: Register = (on, options) => {
     }
 
     return ran
+  }).catch(($, e, next) => next(e))
+
+  // The footer's right side, beside the statusline: what the main agent is doing now, so it shows with the pane closed.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    const main = (await read($, activities)).filter(a => a.agentId === null)
+    const a = main.find(x => x.phase === 'running') ?? main[0]
+    const t = await $.clock.now()
+    const isRunning = a?.phase === 'running'
+    // A finished call lingers a few seconds, then the label goes quiet.
+    const doing = a && (isRunning || t - a.at <= LINGER_MS) ? a : null
+    // Subagents at work, by type: `2 agents Explore + general-purpose`, like the model and effort chip.
+    const working = (await $.agent.list().catch(() => [])).filter(g => g.status === 'running')
+    if (!doing && working.length === 0) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const types = [...new Set(working.map(g => g.type))]
+    const what = !doing ? '' : doing.path === null ? footerWhat(doing.label) : `${shortenPath(shortPath(doing), 28)}${doing.line ? `:${doing.line}` : ''}`
+    const modes = e.props.modes.join(' & ')
+    return (
+      <Box flexDirection="row" gap={1}>
+        {modes ? <Text dimColor>{modes}</Text> : ''}
+        {working.length > 0 ? (
+          <Text>
+            <Text bold color="claude">{`${working.length} ${working.length === 1 ? 'agent' : 'agents'}`}</Text>
+            <Text dimColor>{` ${clip(types.join(' + '), 28)}`}</Text>
+          </Text>
+        ) : (
+          ''
+        )}
+        {doing ? <Text bold color={BADGE[doing.kind].color}>{BADGE[doing.kind].label.toLowerCase()}</Text> : ''}
+        {doing ? <Text dimColor={!isRunning} wrap="truncate-end">{what}</Text> : ''}
+        {doing && isRunning ? <Text dimColor>{ago(t - doing.at)}</Text> : ''}
+      </Box>
+    )
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -1225,6 +1268,8 @@ export const register: Register = (on, options) => {
     )
 
     const grip = thumb(top, codeTotal, layout.codeRows)
+    const totalAdded = files.reduce((n, f) => n + (f.added ?? 0), 0)
+    const totalRemoved = files.reduce((n, f) => n + (f.removed ?? 0), 0)
     const kindName = focus ? BADGE[focus.kind].label.charAt(0) + BADGE[focus.kind].label.slice(1).toLowerCase() : ''
     const focusAge = focus ? mark(focus) || ago(t - focus.at) : ''
     const focusRoom = focus
@@ -1410,6 +1455,16 @@ export const register: Register = (on, options) => {
           {maxTop > 0 ? <Button key="top" label="top" hotkey="t" onPress={() => scrollCode($, -codeTotal)} /> : ''}
           {maxTop > 0 ? <Button key="end" label="end" hotkey="e" onPress={() => scrollCode($, codeTotal)} /> : ''}
           {nvimServer && focus?.path ? <Button key="nvim" label="nvim" hotkey="n" onPress={() => mirror($, focus)} /> : ''}
+          {/* The row's free right side: what the whole session has touched. */}
+          <Box flexGrow={1} flexShrink={1} justifyContent="flex-end">
+            {files.length > 0 ? (
+              <Text dimColor wrap="truncate-start">
+                {`${files.length} ${files.length === 1 ? 'file' : 'files'}${totalAdded + totalRemoved > 0 ? ` · +${totalAdded} −${totalRemoved}` : ''}`}
+              </Text>
+            ) : (
+              ''
+            )}
+          </Box>
         </Box>
       </Box>
     )

@@ -140,7 +140,6 @@ test('follows a cd, trusts the tool over its snapshot, and starts over on /clear
     [FILE, 'a\nb\nc\n'],
     [DEEP, Array.from({ length: 10 }, (_, i) => `export const u${i + 1} = ${i + 1}`).join('\n') + '\n'],
   ])
-  const statuses: (string | undefined)[] = []
 
   on('fs.read', (_, e) => {
     const text = files.get((e as { path: string }).path)
@@ -151,10 +150,7 @@ test('follows a cd, trusts the tool over its snapshot, and starts over on /clear
   on('session.root', () => ({ value: '/work/app' }) as never)
   on('command.register', () => ({ value: undefined }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
-  on('ui.status', (_, e) => {
-    statuses.push((e as { text?: string }).text)
-    return { value: undefined } as never
-  })
+  on('ui.status', () => ({ value: undefined }) as never)
   on('turn.complete', () => ({ text: 'done' }) as never)
   on('session.end', () => ({ sessionId: 's1' }) as never)
   on('tool.call', (_, e) => {
@@ -209,11 +205,7 @@ test('follows a cd, trusts the tool over its snapshot, and starts over on /clear
     await ui.unmount()
   }
 
-  expect(statuses.some(text => /◉ edit/.test(text ?? ''))).toBe(true)
-  const shown = statuses.length
   await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', category: null, explanation: null } as never)
-  expect(statuses.length).toBeGreaterThan(shown)
-  expect(statuses[statuses.length - 1]).toBeUndefined()
 
   await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } } as never)
   for (const surface of ['terminal', 'desktop'] as const) {

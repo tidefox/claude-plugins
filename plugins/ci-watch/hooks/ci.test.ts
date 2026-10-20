@@ -203,7 +203,6 @@ test('watches a PR the agent opens until CI settles', async ($, on) => {
   // Second poll: running.
   await clock.advance(15000)
   expect(await shows(/RUNNING/)).toBe(true)
-  expect(status.some(s => s?.startsWith('CI #42'))).toBe(true)
 
   // Third poll: all checks done, one failed; not settled until a poll confirms it.
   await clock.advance(15000)

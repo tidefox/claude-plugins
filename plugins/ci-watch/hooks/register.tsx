@@ -107,24 +107,6 @@ function checkTime(c: Check, t: number) {
   return duration((c.completedAt ?? t) - c.startedAt)
 }
 
-function summary(pr: WatchedPr, t: number) {
-  const done = pr.checks.filter(c => c.bucket !== 'pending').length
-  const fails = count(pr.checks, 'fail') + count(pr.checks, 'cancel')
-  const state =
-    pr.phase === 'running'
-      ? `${SPINNER[Math.floor(t / TICK_MS) % SPINNER.length]} ${done}/${pr.checks.length}${fails > 0 ? ` ✗${fails}` : ''}`
-      : pr.phase === 'passed'
-        ? `✓ passed`
-        : pr.phase === 'failed'
-          ? `✗ ${fails} failed`
-          : pr.phase === 'waiting'
-            ? '◌ waiting for checks'
-            : pr.phase === 'no-ci'
-              ? '○ no checks'
-              : '⚠ gh error'
-  return `CI #${pr.number} ${state}`
-}
-
 /** How long CI has run: first check start to last finish, else since the watch began. */
 function ciElapsed(pr: WatchedPr, t: number) {
   const starts = pr.checks.map(c => c.startedAt).filter((v): v is number => v !== null)
@@ -232,7 +214,6 @@ async function rowHover($: EngineInterface): Promise<string> {
 let pollMs = 15000
 let onFinish = 'notify'
 const inFlight = new Set<string>()
-let lastStatus: string | undefined
 
 function patch($: EngineInterface, url: string, fields: Partial<WatchedPr>) {
   return update($, prs, list => list.map(pr => (pr.url === url ? { ...pr, ...fields } : pr)))
@@ -360,13 +341,6 @@ async function tick($: EngineInterface) {
   for (const pr of list) {
     if (isActive(pr) && (pr.polledAt === null || t - pr.polledAt >= pollMs)) void poll($, pr)
   }
-
-  const top = list.find(isActive) ?? list[0]
-  const status = top ? summary(top, t) : undefined
-  if (status !== lastStatus) {
-    lastStatus = status
-    $.ui.status(status)
-  }
 }
 
 async function rerunFailed($: EngineInterface, pr: WatchedPr) {
@@ -426,8 +400,6 @@ export const register: Register = (on, options) => {
     if (verb === 'stop') {
       await update($, prs, () => [])
       await update($, pinned, () => null)
-      lastStatus = undefined
-      $.ui.status(undefined)
       await $.ui.close({ id: PANE })
       return { text: 'Stopped watching all PRs.' }
     }
@@ -776,6 +748,20 @@ export const register: Register = (on, options) => {
   })
 
   // A one-line band for when the pane waits undrawn (a narrow terminal it opened on unasked).
+  // A short chip in the footer's right-hand labels: the newest PR's CI state, `CI #101 ✓` or `CI 3/5`.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    const list = await read($, prs)
+    // Reading `now` redraws the chip as a running PR polls.
+    await read($, now)
+    const pr = list.find(isActive) ?? list[0]
+    if (!pr || pr.phase === 'no-ci') return next(e)
+    const done = pr.checks.filter(c => c.bucket !== 'pending').length
+    const fails = pr.checks.filter(c => c.bucket === 'fail' || c.bucket === 'cancel').length
+    const state =
+      pr.phase === 'running' ? `${done}/${pr.checks.length}${fails > 0 ? ` ✗${fails}` : ''}` : pr.phase === 'passed' ? '✓' : pr.phase === 'failed' ? `✗${fails}` : pr.phase === 'waiting' ? '◌' : '⚠'
+    return next({ ...e, props: { ...e.props, modes: [...e.props.modes, `CI #${pr.number} ${state}`] } })
+  }).catch(($, e, next) => next(e))
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const list = await read($, prs)
     const pr = list.find(isActive)
