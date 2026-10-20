@@ -302,7 +302,7 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
   const heading = (title: string, note: string) => (
     <Box flexDirection="row" height={1}>
       <Box flexGrow={1} flexShrink={1}>
-        <Text bold wrap="truncate-end">{title}</Text>
+        <Text bold dimColor wrap="truncate-end">{title}</Text>
       </Box>
       <Box flexShrink={0}>
         <Text dimColor>{note}</Text>
@@ -357,7 +357,7 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
                 {focus.isScratch ? <Text color="remember"> scratch</Text> : ''}
               </Box>
               <Box flexGrow={1} flexShrink={1}>
-                <Text wrap="truncate-start" bold>{` ${fitActivity(focus, focusRoom)}`}</Text>
+                <Text wrap="truncate-start" bold dimColor>{` ${fitActivity(focus, focusRoom)}`}</Text>
               </Box>
               <Box flexShrink={0}>
                 {stat(focus.added, focus.removed)}
