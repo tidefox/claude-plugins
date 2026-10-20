@@ -50,6 +50,8 @@ declare module 'claude-code' {
       pinned: string | null
       /** Where the person scrolled the code window, for the activity it showed; another activity follows again. */
       scroll: { id: string; top: number } | null
+      /** How far the person scrolled the Files and Trail lists, in rows from the newest. */
+      lists: { files: number; trail: number }
     }
   }
 }

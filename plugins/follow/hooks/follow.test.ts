@@ -1,28 +1,11 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Activity } from '../types'
-import {
-  autoTop,
-  buildHunk,
-  cellWidth,
-  clip,
-  codeLayout,
-  diffRows,
-  expandTabs,
-  grepFiles,
-  isScratchPath,
-  lineOf,
-  namedPaths,
-  oneLine,
-  parseShell,
-  shellDir,
-  shortenPath,
-  splitLines,
-  thumb,
-  trim,
-  wrapCells,
-  wrapRows,
-} from './register'
+import { trim } from './capture'
+import { buildHunk, diffRows } from './diff'
+import { autoTop, cellWidth, clip, codeLayout, expandTabs, shortenPath, thumb, wrapCells, wrapRows } from './layout'
+import { grepFiles, isScratchPath, namedPaths, parseShell, shellDir } from './parse'
+import { lineOf, oneLine, splitLines } from './text'
 
 test('finds the line an edit lands on', async () => {
   const text = 'a\nb\nc\nneedle\ne\n'
