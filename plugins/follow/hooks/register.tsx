@@ -815,7 +815,7 @@ export function shortenPath(path: string, room: number): string {
  * One row of the code window: a piece of a line, the line's numbers on either side and its diff
  * marker; or, between two hunks of a diff, a gap.
  */
-export type CodeRow = { line: number; part: number; text: string; t: ' ' | '-' | '+'; old: number; new: number; isGap?: true }
+export type CodeRow = { line: number; part: number; text: string; t: ' ' | '-' | '+'; old: number; new: number; isGap?: true; whole?: string; offset?: number }
 
 /** Lines hard-wrapped to `room` cells, tabs expanded: one CodeRow per row the window draws, a gap where the hunk changes. */
 export function wrapRows(lines: { text: string; t: CodeRow['t']; old: number; new: number; hunk?: number }[], room: number): CodeRow[] {
@@ -823,7 +823,14 @@ export function wrapRows(lines: { text: string; t: CodeRow['t']; old: number; ne
   lines.forEach((l, line) => {
     const before = lines[line - 1]
     if (before && before.hunk !== l.hunk) rows.push({ line, part: 0, text: '⋯', t: ' ', old: 0, new: 0, isGap: true })
-    wrapCells(expandTabs(l.text), Math.max(1, room)).forEach((text, part) => rows.push({ line, part, text, t: l.t, old: l.old, new: l.new }))
+    const whole = expandTabs(l.text)
+    const parts = wrapCells(whole, Math.max(1, room))
+    // A wrapped line keeps its whole text and where each piece starts, so the piece is drawn cut from the highlighted line.
+    let offset = 0
+    parts.forEach((text, part) => {
+      rows.push({ line, part, text, t: l.t, old: l.old, new: l.new, ...(parts.length > 1 ? { whole, offset } : {}) })
+      offset += cellWidth(text)
+    })
   })
   return rows
 }
@@ -1215,7 +1222,7 @@ export const register: Register = (on, options) => {
       const runs: CodeRow[][] = []
       for (const row of shown) {
         const last = runs[runs.length - 1]
-        if (last && last[0]!.t === row.t && !last[0]!.isGap && !row.isGap) last.push(row)
+        if (last && last[0]!.t === row.t && !last[0]!.isGap && !row.isGap && last[0]!.whole === undefined && row.whole === undefined) last.push(row)
         else runs.push([row])
       }
       return (
@@ -1243,6 +1250,13 @@ export const register: Register = (on, options) => {
               <Box key={`run:${i}`} height={run.length} backgroundColor={TONE[run[0]!.t]}>
                 {run[0]!.isGap ? (
                   <Text dimColor>⋯</Text>
+                ) : run[0]!.whole !== undefined ? (
+                  // Highlighted as the whole line, then cut to this piece: a string or comment that wraps keeps its colour.
+                  <Box overflow="hidden" flexGrow={1} height={1}>
+                    <Box flexShrink={0} width={cellWidth(run[0]!.whole)} marginLeft={-(run[0]!.offset ?? 0)}>
+                      <Code source={run[0]!.whole || ' '} path={focus?.path ?? ''} wrap="truncate-end" />
+                    </Box>
+                  </Box>
                 ) : (
                   <Code source={run.map(r => r.text).join('\n') || ' '} path={focus?.path ?? ''} wrap="truncate-end" />
                 )}

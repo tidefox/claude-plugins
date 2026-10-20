@@ -189,6 +189,14 @@ test('wraps a long line by cells, never splitting a wide character', async () =>
     [10, 1, 'xxxx'],
     [10, 2, 'xx'],
   ])
+  // A wrapped line keeps its whole text and each piece's start, so the highlight can be cut from the whole line.
+  expect(rows.map(r => [r.whole, r.offset])).toEqual([
+    ['short', 0],
+    ['short', 4],
+    ['x'.repeat(10), 0],
+    ['x'.repeat(10), 4],
+    ['x'.repeat(10), 8],
+  ])
 })
 
 test('shortens a path from the middle, keeping its file name', async () => {
