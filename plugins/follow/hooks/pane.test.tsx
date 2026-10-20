@@ -88,7 +88,8 @@ test('follows a read, an edit and a scratchpad write into the pane', async ($, o
     expect(await ui.find({ type: 'Text', text: /^Edit$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /main\.ts:20/ })).toBeDefined()
     const diff = await diffLines(ui)
-    expect(diff).toContain('-const line20 = 20\n+const line20 = 2000\n+const extra = 1')
+    // The code column carries the lines alone: the +/- marks are the gutter's.
+    expect(diff).toContain(' const line20 = 20\n const line20 = 2000\n const extra = 1')
     // Both sides' numbers in a gutter as wide as the largest: old 20 removed, new 21 added.
     expect(await ui.find({ type: 'Text', text: '20    - ' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '   21 + ' })).toBeDefined()
@@ -185,9 +186,9 @@ test('follows a cd, trusts the tool over its snapshot, and starts over on /clear
     const ui = await mount(surface)
     await ui.drawn()
     const source = await diffLines(ui)
-    expect(source).toContain('-c')
+    expect(source).toContain(' c\n C')
     // The diff is against what the tool saw, so the other change is no part of it.
-    expect(source).not.toContain('-b')
+    expect(source).not.toContain(' b')
     await ui.unmount()
   }
 
@@ -255,8 +256,7 @@ test('shows what a script changed as edits, one per file', async ($, on) => {
     await ui.drawn()
     expect(await ui.find({ type: 'Text', text: /^Edit$/ })).toBeDefined()
     const source = await diffLines(ui)
-    expect(source).toContain('-line 7')
-    expect(source).toContain('+line seven')
+    expect(source).toContain(' line 7\n line seven')
     // Both files the script changed are in Files.
     expect(await ui.find({ type: 'Text', text: 'src/main.ts' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'notes.md' })).toBeDefined()
