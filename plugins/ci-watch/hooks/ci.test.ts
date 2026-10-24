@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { checkLines, findPr, focusOf, paneLayout, parseChecks, phaseOf } from './register'
+import { checkLines, findPr, focusOf, paneLayout, parseChecks, phaseOf, wrapCells } from './register'
 
 const URL = 'https://github.com/acme/app/pull/42'
 
@@ -22,6 +22,13 @@ test('finds the PR in gh output', async () => {
     'https://github.com/acme/app/pull/7',
   )
   expect(findPr('nothing here')).toBe(null)
+})
+
+test('wraps a title at spaces, cutting only a word wider than a row', async () => {
+  expect(wrapCells('feat(engine-bin): one binary for every engine', 20)).toEqual(['feat(engine-bin):', 'one binary for every', 'engine'])
+  expect(wrapCells('short', 20)).toEqual(['short'])
+  expect(wrapCells('a reallyreallylongword', 8)).toEqual(['a', 'reallyr…'])
+  expect(wrapCells('', 8)).toEqual([])
 })
 
 test('reads check buckets into a phase', async () => {
@@ -119,12 +126,12 @@ test('keeps a narrow pane inside its cells: whole badge, tally and times, long n
     expect(await ui.find({ type: 'Text', text: ' ✓1 ' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: ' ✗1 ' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: ' 1m05s' })).toBeDefined()
-    // The title and a check's name are cut to the cells left beside them, never wrapped.
-    // The number and the title open the PR's page.
-    expect(await ui.find({ type: 'Link', text: '#42' })).toBeDefined()
-    expect(await ui.find({ type: 'Link', text: 'Retr…' })).toBeDefined()
-    const link = await ui.find({ type: 'Link', text: 'fail-jo…' })
-    expect(link).toBeDefined()
+    // The title wraps onto its own rows; a word wider than the row and a check's name are cut.
+    expect(await ui.find({ type: 'Text', text: 'Retry' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '    xxxxxxx…' })).toBeDefined()
+    // The PR's URL has a row of its own: an anchor on desktop, plain text a terminal links itself.
+    expect(await ui.find({ type: surface === 'desktop' ? 'Link' : 'Text', text: URL })).toBeDefined()
+    expect(await ui.find({ type: surface === 'desktop' ? 'Link' : 'Text', text: 'fail-jo…' })).toBeDefined()
     await ui.unmount()
   }
 })

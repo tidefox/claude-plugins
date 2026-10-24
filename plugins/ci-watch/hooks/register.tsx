@@ -213,6 +213,21 @@ export function clip(text: string, room: number): string {
   return `${out}…`
 }
 
+/** `text` broken at spaces into lines of at most `room` cells; a word wider than a line is cut. */
+export function wrapCells(text: string, room: number): string[] {
+  const lines: string[] = []
+  let line = ''
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const next = line ? `${line} ${word}` : word
+    if (cellWidth(next) <= room) line = next
+    else {
+      if (line) lines.push(line)
+      line = clip(word, room)
+    }
+  }
+  return line ? [...lines, line] : lines
+}
+
 let blockBackgroundOption = 'auto'
 let themeName: string | null = null
 
@@ -469,6 +484,8 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Link } = $.ui.resolve(e)
+    // A terminal without OSC 8 draws a Link's text then its whole URL: the terminal gets the URL as its own row instead.
+    const isDesktop = e.surface === 'desktop'
     const list = await read($, prs)
     const pin = await read($, pinned)
     const t = Math.max(await read($, now), await $.clock.now())
@@ -580,7 +597,7 @@ export const register: Register = (on, options) => {
           <Box flexGrow={1} flexShrink={1}>
             <Text wrap="truncate-end" dimColor={isQuiet} bold={c.bucket === 'fail'}>
               {flow ? <Text dimColor>{flow} › </Text> : ''}
-              {c.link ? <Link href={c.link}>{name}</Link> : name}
+              {c.link && isDesktop ? <Link href={c.link}>{name}</Link> : name}
             </Text>
           </Box>
           <Box flexShrink={0}>
@@ -599,21 +616,23 @@ export const register: Register = (on, options) => {
         pr.phase === 'no-ci' ? <Text dimColor>○ No checks were reported for this PR.</Text> : null,
         pr.error ? <Text color="error" wrap="truncate-end">⚠ {pr.error}</Text> : null,
       ].filter(n => n !== null)
-      // One PR's checks never take more than the window: passed and skipped collapse first.
-      const lines = checkLines(pr.checks, Math.max(3, layout.cardRows - 3 - notes.length))
-      // The number, the draft tag and the badge keep their cells: only the title gives way.
+      // The number, the draft tag and the badge keep their cells; the title wraps onto rows of its own.
       const badgeWidth = BADGE[pr.phase].label.length + 2 + (pr.phase === 'running' ? 2 : 0)
-      const titleRoom = inner - 1 - String(pr.number).length - 1 - (pr.isDraft ? 6 : 0) - 1 - badgeWidth
+      const indent = String(pr.number).length + 2
+      const titleRoom = Math.max(8, inner - indent - (pr.isDraft ? 6 : 0) - 1 - badgeWidth)
+      const [first = '', ...rest] = wrapCells(pr.title || pr.repo, titleRoom)
+      // One PR's checks never take more than the window: passed and skipped collapse first.
+      const lines = checkLines(pr.checks, Math.max(3, layout.cardRows - 4 - rest.length - notes.length))
       const timing = ` ${pr.checks.length > 0 ? `${done}/${pr.checks.length} · ` : ''}⏱ ${elapsed}`
       const branchRoom = inner - cellWidth(timing) - cellWidth(pr.repo)
       const accent = pr.url === pin ? 'warning' : BADGE[pr.phase].color
       return [
           <Box flexDirection="row" height={1}>
             <Box flexShrink={0}>
-              <Text bold color="claude"><Link href={pr.url}>#{pr.number}</Link></Text>
+              <Text bold color="claude">{`#${pr.number} `}</Text>
             </Box>
             <Box flexGrow={1} flexShrink={1}>
-              <Text bold wrap="truncate-end"> <Link href={pr.url}>{clip(pr.title || pr.repo, titleRoom)}</Link></Text>
+              <Text bold wrap="truncate-end">{first}</Text>
             </Box>
             <Box flexShrink={0}>
               {pr.isDraft ? <Text color="inactive">{' DRAFT'}</Text> : ''}
@@ -621,10 +640,11 @@ export const register: Register = (on, options) => {
               {badge(pr.phase)}
             </Box>
           </Box>,
+          ...rest.map(line => <Text bold wrap="truncate-end">{`${' '.repeat(indent)}${line}`}</Text>),
           <Box flexDirection="row" height={1}>
             <Box flexGrow={1} flexShrink={1}>
               <Text dimColor wrap="truncate-end">
-                <Link href={pr.url}>{pr.repo}</Link>
+                {pr.repo}
                 {pr.branch ? clip(` ⎇ ${pr.branch}`, branchRoom) : ''}
               </Text>
             </Box>
@@ -632,6 +652,7 @@ export const register: Register = (on, options) => {
               <Text dimColor>{timing}</Text>
             </Box>
           </Box>,
+          <Text color="subtle" wrap="truncate-end">{isDesktop ? <Link href={pr.url}>{pr.url}</Link> : pr.url}</Text>,
           <Box flexDirection="row" height={1}>
             <Box flexGrow={1} flexShrink={1} overflow="hidden">
               {bar(pr, Math.max(4, inner - tallyWidth(pr) - 1))}

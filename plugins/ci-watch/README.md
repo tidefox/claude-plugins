@@ -9,9 +9,9 @@ A Claude Code mod that watches CI on pull requests the agent drafts or opens.
   header with a `● LIVE` / `◎ PINNED` / `○ SETTLED` chip, then a card for every watched PR,
   the focused one first, stacked and scrolling inside the pane (mouse wheel, `j` / `k`, a
   scrollbar on the right). Each card has an accent
-  bar in its status color and a raised fill (`#N` and title, a status badge, a draft tag, repo,
-  branch, `done/total` and elapsed CI time, a segmented pass/fail/running bar with `✓N ✗M ●K`
-  chips, then per-check rows: failures first, clickable links, live durations; passed and
+  bar in its status color and a raised fill (`#N` and the title, wrapped rather than cut, a status badge, a draft tag;
+  repo, branch, `done/total` and elapsed CI time; the PR's URL on its own row; a segmented pass/fail/running bar with `✓N ✗M ●K`
+  chips, then per-check rows: failures first, names linked on desktop, live durations; passed and
   skipped checks collapse to a count when one PR's checks would fill the window). Below it, a
   Pull requests block of six fixed rows lists the watched PRs (a whole row lights under the pointer); click one to pin it, `f` to follow the
   newest running PR again. Buttons along the bottom: **re-run failed**, **refresh** (`u`),

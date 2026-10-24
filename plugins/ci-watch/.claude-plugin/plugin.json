@@ -1,6 +1,6 @@
 {
   "name": "ci-watch",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "author": { "name": "tidefox" },
   "description": "Watches CI on pull requests the agent drafts or opens, in a live pane, the status line and a notification when it settles",
   "types": "./types/index.d.ts",
