@@ -610,10 +610,10 @@ export const register: Register = (on, options) => {
       return [
           <Box flexDirection="row" height={1}>
             <Box flexShrink={0}>
-              <Text bold color="claude">#{pr.number}</Text>
+              <Text bold color="claude"><Link href={pr.url}>#{pr.number}</Link></Text>
             </Box>
             <Box flexGrow={1} flexShrink={1}>
-              <Text bold wrap="truncate-end">{` ${clip(pr.title || pr.repo, titleRoom)}`}</Text>
+              <Text bold wrap="truncate-end"> <Link href={pr.url}>{clip(pr.title || pr.repo, titleRoom)}</Link></Text>
             </Box>
             <Box flexShrink={0}>
               {pr.isDraft ? <Text color="inactive">{' DRAFT'}</Text> : ''}

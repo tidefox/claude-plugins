@@ -120,8 +120,9 @@ test('keeps a narrow pane inside its cells: whole badge, tally and times, long n
     expect(await ui.find({ type: 'Text', text: ' ✗1 ' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: ' 1m05s' })).toBeDefined()
     // The title and a check's name are cut to the cells left beside them, never wrapped.
-    const title = await ui.find({ type: 'Text', text: ' Retr…' })
-    expect(title).toBeDefined()
+    // The number and the title open the PR's page.
+    expect(await ui.find({ type: 'Link', text: '#42' })).toBeDefined()
+    expect(await ui.find({ type: 'Link', text: 'Retr…' })).toBeDefined()
     const link = await ui.find({ type: 'Link', text: 'fail-jo…' })
     expect(link).toBeDefined()
     await ui.unmount()
