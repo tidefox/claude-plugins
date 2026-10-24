@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, UiScrollInput, UiScrollResult } from 'claude-code'
 
 import type { Check, CheckBucket, Phase, WatchedPr } from '../types'
 
@@ -15,6 +15,7 @@ const prs = atom({ plugin: 'ci-watch', key: 'prs' } as const, [])
 const now = atom({ plugin: 'ci-watch', key: 'now' } as const, 0)
 const paneShown = atom({ plugin: 'ci-watch', key: 'paneShown' } as const, false)
 const pinned = atom({ plugin: 'ci-watch', key: 'pinned' } as const, null)
+const scroll = atom({ plugin: 'ci-watch', key: 'scroll' } as const, 0)
 
 const PR_URL = /https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g
 const PR_REF = /([\w.-]+\/[\w.-]+)#(\d+)/
@@ -145,14 +146,37 @@ export function focusOf(list: WatchedPr[], pin: string | null): WatchedPr | unde
   return list.find(pr => pr.url === pin) ?? list.find(isActive) ?? list[0]
 }
 
+/** Rows the PR list always shows. */
+const LIST_ROWS = 6
+/** Rows a wheel tick or j/k moves the cards. */
+const SCROLL_STEP = 3
+/** The cards' first row from the pane's top: the header, then a gap. */
+const CARDS_TOP = 2
+
 /**
- * The fixed layout's rows, top to bottom: header, gap, the focused PR's block (title, branch,
- * bar, then the checks), gap + heading + rows for the PR list, and the buttons.
+ * The fixed layout's rows, top to bottom: header, gap, the cards (one per PR, scrolling
+ * inside their rows), gap + heading + six rows for the PR list, and the buttons.
  */
 export function paneLayout(bodyRows: number) {
-  const listRows = bodyRows >= 34 ? 4 : 2
-  const focusRows = Math.max(6, bodyRows - 2 - (2 + listRows) - 1)
-  return { listRows, focusRows, checkRows: focusRows - 3 }
+  return { listRows: LIST_ROWS, cardRows: Math.max(4, bodyRows - CARDS_TOP - (2 + LIST_ROWS) - 1) }
+}
+
+/** A scrollbar's thumb over `rows` cells for a window at `top` of `total`: where it starts and how long. */
+export function thumb(top: number, total: number, rows: number): { from: number; size: number } {
+  if (total <= rows) return { from: 0, size: rows }
+  const size = Math.max(1, Math.round((rows * rows) / total))
+  const from = Math.round((top / (total - rows)) * (rows - size))
+  return { from: Math.min(rows - size, Math.max(0, from)), size }
+}
+
+/** Where the cards last drew: the wheel and j/k move them from there. */
+let drawn = { rows: 0, top: 0, maxTop: 0 }
+
+async function scrollCards($: EngineInterface, by: number) {
+  const top = Math.min(drawn.maxTop, Math.max(0, drawn.top + by))
+  if (top === drawn.top) return
+  drawn = { ...drawn, top }
+  await update($, scroll, () => top)
 }
 
 // ── cells (as follow measures them) ──────────────────────────────────────
@@ -428,6 +452,16 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // The wheel over the cards scrolls them, not the pane: the layout is fixed.
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e: UiScrollInput, next: (e: UiScrollInput) => Promise<UiScrollResult>) => {
+    if (e.origin.kind !== 'person' || e.by === 0) return next(e)
+    const row = e.pointer?.row
+    if (row !== undefined && (row < CARDS_TOP || row >= CARDS_TOP + drawn.rows)) return next(e)
+    // A page key asks for the body's height: page the cards instead.
+    await scrollCards($, row === undefined && Math.abs(e.by) >= e.bodyRows ? Math.sign(e.by) * drawn.rows : e.by)
+    return next({ ...e, offset: Math.max(0, e.offset - e.by) })
+  }).catch(($, e, next) => next(e))
+
   on('ui.close', { id: PANE }, async ($, e, next) => {
     await update($, paneShown, () => false)
     return next(e)
@@ -445,11 +479,11 @@ export const register: Register = (on, options) => {
     const active = list.filter(isActive).length
     const spin = SPINNER[Math.floor(t / TICK_MS) % SPINNER.length] ?? '●'
 
-    // A fixed layout as tall as the body: the checks take what the header and the PR list leave.
+    // A fixed layout as tall as the body: the cards take what the header and the PR list leave, and scroll inside it.
     const rows = Math.max(16, e.props.scroll.bodyRows)
     const layout = paneLayout(rows)
-    // A block's text runs between the pane's padding, its accent bar and its own padding.
-    const inner = width - 5
+    // A card's text runs between the pane's padding, its accent bar, its own padding and the scrollbar.
+    const inner = width - 6
     const panel = await blockBackground($)
     const hover = await rowHover($)
 
@@ -556,7 +590,8 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const focusBlock = (pr: WatchedPr) => {
+    /** A PR's card as rows of one line each, so the cards scroll a row at a time. */
+    const card = (pr: WatchedPr) => {
       const elapsed = ciElapsed(pr, t)
       const done = pr.checks.filter(c => c.bucket !== 'pending').length
       const notes = [
@@ -564,17 +599,15 @@ export const register: Register = (on, options) => {
         pr.phase === 'no-ci' ? <Text dimColor>○ No checks were reported for this PR.</Text> : null,
         pr.error ? <Text color="error" wrap="truncate-end">⚠ {pr.error}</Text> : null,
       ].filter(n => n !== null)
-      const lines = checkLines(pr.checks, layout.checkRows - notes.length)
+      // One PR's checks never take more than the window: passed and skipped collapse first.
+      const lines = checkLines(pr.checks, Math.max(3, layout.cardRows - 3 - notes.length))
       // The number, the draft tag and the badge keep their cells: only the title gives way.
       const badgeWidth = BADGE[pr.phase].label.length + 2 + (pr.phase === 'running' ? 2 : 0)
       const titleRoom = inner - 1 - String(pr.number).length - 1 - (pr.isDraft ? 6 : 0) - 1 - badgeWidth
       const timing = ` ${pr.checks.length > 0 ? `${done}/${pr.checks.length} · ` : ''}⏱ ${elapsed}`
       const branchRoom = inner - cellWidth(timing) - cellWidth(pr.repo)
-      return block(
-        'focus',
-        isPinned ? 'warning' : BADGE[pr.phase].color,
-        layout.focusRows,
-        <Box flexDirection="column">
+      const accent = pr.url === pin ? 'warning' : BADGE[pr.phase].color
+      return [
           <Box flexDirection="row" height={1}>
             <Box flexShrink={0}>
               <Text bold color="claude">#{pr.number}</Text>
@@ -587,7 +620,7 @@ export const register: Register = (on, options) => {
               <Text> </Text>
               {badge(pr.phase)}
             </Box>
-          </Box>
+          </Box>,
           <Box flexDirection="row" height={1}>
             <Box flexGrow={1} flexShrink={1}>
               <Text dimColor wrap="truncate-end">
@@ -598,7 +631,7 @@ export const register: Register = (on, options) => {
             <Box flexShrink={0}>
               <Text dimColor>{timing}</Text>
             </Box>
-          </Box>
+          </Box>,
           <Box flexDirection="row" height={1}>
             <Box flexGrow={1} flexShrink={1} overflow="hidden">
               {bar(pr, Math.max(4, inner - tallyWidth(pr) - 1))}
@@ -607,18 +640,17 @@ export const register: Register = (on, options) => {
               <Text> </Text>
               {tally(pr)}
             </Box>
-          </Box>
-          {notes}
-          {lines.map(checkRow)}
-        </Box>,
-      )
+          </Box>,
+        ...notes,
+        ...lines.map(checkRow),
+      ].map((node, i) => ({ key: `${pr.url}:${i}`, accent, node }))
     }
 
     const idleBlock = () =>
       block(
         'idle',
         'claude',
-        layout.focusRows,
+        layout.cardRows,
         <Box flexDirection="column">
           <Text bold color="claude">◉ No pull requests watched yet.</Text>
           <Text dimColor wrap="wrap">They show up here when Claude runs gh pr create or gh pr ready, or with /ci watch owner/repo#123.</Text>
@@ -643,7 +675,7 @@ export const register: Register = (on, options) => {
               <Text bold backgroundColor="#1d460f">{' ✓N '}</Text>
               <Text bold backgroundColor="#540d06">{' ✗M '}</Text>
             </Text>
-            <Text dimColor wrap="wrap">click a PR to pin it · f follow live · u refresh · /ci clear</Text>
+            <Text dimColor wrap="wrap">click a PR to pin it · j/k scroll · f follow live · u refresh</Text>
           </Box>
         </Box>,
       )
@@ -658,7 +690,7 @@ export const register: Register = (on, options) => {
         // The whole row lights under the pointer, not only its text.
         <Box key={`p:${pr.url}`} flexDirection="row" height={1} hover={{ backgroundColor: hover }}>
           <Box flexGrow={1} flexShrink={1}>
-            <Button key={`pr:${pr.url}`} plain onPress={() => update($, pinned, () => pr.url)}>
+            <Button key={`pr:${pr.url}`} plain onPress={() => Promise.all([update($, pinned, () => pr.url), update($, scroll, () => 0)])}>
               <Text color={isFocus ? 'claude' : 'subtle'}>{isFocus ? '▸' : ' '}</Text>
               <Text color={BADGE[pr.phase].color}>{pr.phase === 'running' ? spin : pr.phase === 'passed' ? '✓' : pr.phase === 'failed' ? '✗' : pr.phase === 'error' ? '⚠' : '○'}</Text>{' '}
               <Text bold color={isFocus ? 'claude' : undefined}>#{pr.number}</Text>{' '}
@@ -681,6 +713,45 @@ export const register: Register = (on, options) => {
       )
     }
 
+    // Every PR's card, the focused one first, a blank row between: the window shows the rows from the scrolled top.
+    const cardList = focus ? [focus, ...list.filter(pr => pr !== focus)] : []
+    const cardLines = cardList.flatMap((pr, i) => [...(i > 0 ? [null] : []), ...card(pr)])
+    const maxTop = Math.max(0, cardLines.length - layout.cardRows)
+    const top = Math.min(maxTop, Math.max(0, await read($, scroll)))
+    drawn = { rows: layout.cardRows, top, maxTop }
+    const grip = thumb(top, cardLines.length, layout.cardRows)
+    const cardsBlock = () => (
+      <Box key="cards" flexDirection="row" marginTop={1} height={layout.cardRows}>
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} overflow="hidden">
+          {cardLines.slice(top, top + layout.cardRows).map((line, i) =>
+            line === null ? (
+              <Text key={`gap:${top + i}`}> </Text>
+            ) : (
+              <Box key={line.key} flexDirection="row" height={1}>
+                <Box flexShrink={0}>
+                  <Text color={line.accent}>┃</Text>
+                </Box>
+                <Box flexGrow={1} flexShrink={1} backgroundColor={panel} paddingX={1} overflow="hidden">
+                  {line.node as never}
+                </Box>
+              </Box>
+            ),
+          )}
+        </Box>
+        {/* The scrollbar's column stays, blank when nothing scrolls: the cards never change width. */}
+        <Box flexDirection="column" flexShrink={0} width={1}>
+          {Array.from({ length: layout.cardRows }, (_, i) => {
+            const isThumb = i >= grip.from && i < grip.from + grip.size
+            return (
+              <Text key={`bar:${i}`} color={isThumb ? 'claude' : 'subtle'}>
+                {maxTop === 0 ? ' ' : isThumb ? '┃' : '│'}
+              </Text>
+            )
+          })}
+        </Box>
+      </Box>
+    )
+
     const canRerun = focus !== undefined && fails(focus) > 0 && focus.phase !== 'running'
 
     return (
@@ -694,11 +765,11 @@ export const register: Register = (on, options) => {
           </Box>
           <Box flexDirection="row" gap={1} flexShrink={0}>
             <Text bold color={chip.color}>{chip.text}</Text>
-            {isPinned ? <Button key="live" label="⟲ follow live" variant="primary" hotkey="f" onPress={() => update($, pinned, () => null)} /> : ''}
+            {isPinned ? <Button key="live" label="⟲ follow live" variant="primary" hotkey="f" onPress={() => Promise.all([update($, pinned, () => null), update($, scroll, () => 0)])} /> : ''}
           </Box>
         </Box>
 
-        {focus ? focusBlock(focus) : idleBlock()}
+        {focus ? cardsBlock() : idleBlock()}
 
         {block(
           'prs',
@@ -712,6 +783,8 @@ export const register: Register = (on, options) => {
         )}
 
         <Box flexDirection="row" height={1} gap={1}>
+          <Button key="up" label="↑" hotkey="k" onPress={() => scrollCards($, -SCROLL_STEP)} />
+          <Button key="down" label="↓" hotkey="j" onPress={() => scrollCards($, SCROLL_STEP)} />
           {focus && canRerun ? (
             <Button key={`rerun:${focus.url}`} label="re-run failed" variant="primary" onPress={() => rerunFailed($, focus)} />
           ) : (

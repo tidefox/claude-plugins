@@ -86,27 +86,18 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
   const listTops = await read($, lists)
   const t = await $.clock.now()
   const width = Math.max(24, e.props.bodyColumns)
-  const viewed = e.props.view.agentId ?? null
-
-  const mine = list.filter(a => a.agentId === viewed)
-  // While the agent in view waits on a subagent, the subagent is where the work is.
-  const isDelegating = mine[0]?.kind === 'agent' && mine[0].phase === 'running'
-  const pool = mine.length > 0 && !isDelegating ? mine : list
+  // Every loop's activity, the main agent's and each subagent's, newest first.
+  const pool = list
   const pinnedOne = list.find(a => a.id === pin)
   const focus = pinnedOne ?? pool.find(a => a.view !== null) ?? pool.find(a => a.path !== null)
-  const now = pool[0]
   const isIdle = list.length === 0
 
-  let who = 'main agent'
-  if (viewed !== null) {
-    const agent = (await $.agent.list().catch(() => [])).find(a => a.id === viewed)
+  // The header names the agent whose move is on show.
+  const shownAgent = (focus ?? pool[0])?.agentId ?? null
+  let who = isIdle ? 'waiting for Claude' : 'main agent'
+  if (shownAgent !== null) {
+    const agent = (await $.agent.list().catch(() => [])).find(a => a.id === shownAgent)
     who = agent ? `${agent.type}: ${agent.description}` : 'subagent'
-  } else if (isDelegating) {
-    who = `main › ${mine[0]?.label ?? 'subagent'}`
-  } else if (mine.length === 0 && list.length > 0) {
-    who = 'newest activity'
-  } else if (isIdle) {
-    who = 'waiting for Claude'
   }
 
   const badge = (a: Activity) => (
@@ -501,7 +492,8 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
               <Box key={`t:${a.id}`} flexDirection="row" height={1} hover={{ backgroundColor: hover }}>
                 <Box flexGrow={1} flexShrink={1}>
                   <Button key={`trail:${a.id}`} plain onPress={() => update($, pinned, () => a.id)}>
-                    <Text color={isFocus ? 'claude' : 'subtle'}>{isFocus ? '▸' : ' '}</Text>
+                    {/* A subagent's move is marked ↳, so the main agent's stand apart. */}
+                    <Text color={isFocus ? 'claude' : 'subtle'}>{isFocus ? '▸' : a.agentId !== null ? '↳' : ' '}</Text>
                     <Text bold={isChange(a.kind)} color={BADGE[a.kind].color}>{BADGE[a.kind].label.toLowerCase().padEnd(6)}</Text>{' '}
                     <Text dimColor={isQuiet} bold={isFocus}>
                       {fitActivity(a, room)}

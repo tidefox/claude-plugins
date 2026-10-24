@@ -6,12 +6,14 @@ A Claude Code mod that watches CI on pull requests the agent drafts or opens.
   `create_pull_request` / ready-for-review tools, and reads the PR URL from the output.
 - **Polls** `gh pr checks <url>` every 15s (configurable) until every check settles.
 - **Pane:** the same OpenCode-style fixed layout as [follow](../follow), in Claude's orange: a
-  header with a `● LIVE` / `◎ PINNED` / `○ SETTLED` chip, the focused PR as a block with an accent
+  header with a `● LIVE` / `◎ PINNED` / `○ SETTLED` chip, then a card for every watched PR,
+  the focused one first, stacked and scrolling inside the pane (mouse wheel, `j` / `k`, a
+  scrollbar on the right). Each card has an accent
   bar in its status color and a raised fill (`#N` and title, a status badge, a draft tag, repo,
   branch, `done/total` and elapsed CI time, a segmented pass/fail/running bar with `✓N ✗M ●K`
   chips, then per-check rows: failures first, clickable links, live durations; passed and
-  skipped checks collapse to a count when space runs out). Below it, a Pull requests block lists
-  every watched PR (a whole row lights under the pointer); click one to pin it, `f` to follow the
+  skipped checks collapse to a count when one PR's checks would fill the window). Below it, a
+  Pull requests block of six fixed rows lists the watched PRs (a whole row lights under the pointer); click one to pin it, `f` to follow the
   newest running PR again. Buttons along the bottom: **re-run failed**, **refresh** (`u`),
   **unwatch**, **clear settled**. Before any PR is watched the same layout draws blank, with
   an `○ IDLE` chip and a legend.

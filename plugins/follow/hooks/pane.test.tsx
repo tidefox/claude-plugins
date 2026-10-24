@@ -325,3 +325,27 @@ test('shows what a command printed in the code window', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /output lines 1–3 of 3/ })).toBeDefined()
   await ui.unmount()
 })
+
+test("follows a subagent's move too, and names the agent it shows", async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-20T10:00:00Z') })
+  on('fs.read', () => ({ value: 'one\ntwo\n' }) as never)
+  on('session.cwd', () => ({ value: '/work/app' }) as never)
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'Explore', description: 'find the parser', status: 'running' }] }) as never)
+  const read = (id: string, agentId: string | null, path: string, at: number) => ({
+    id, agentId, tool: 'Read', kind: 'read', isScratch: false, path, line: 1, endLine: 1,
+    label: path, added: null, removed: null, phase: 'done', at, view: null,
+  })
+  // The subagent's read is the newest: the pane shows it, though the main agent's transcript is in view.
+  on('state.get', (_, e, next) =>
+    (e as { key: string }).key === 'activities'
+      ? ({ value: { value: [read('t2', 'a1', '/work/app/src/parse.ts', 2), read('t1', null, FILE, 1)], version: 1 } }) as never
+      : next(e),
+  )
+  const ui = await $.ui.mount({ plugin: 'follow', surface: 'terminal', component: 'Pane', requestId: 'follow', props: props() })
+  expect(await ui.find({ type: 'Text', text: /Explore: find the parser/ })).toBeDefined()
+  // Pinned to the main agent's read: the header says so, and the subagent's row is marked.
+  await ui.press({ key: 'trail:t1' })
+  expect(await ui.find({ type: 'Text', text: /main agent/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '↳' })).toBeDefined()
+  await ui.unmount()
+})

@@ -41,8 +41,8 @@ test('fits the checks list to its rows: failures first, passed and skipped colla
   expect(text(2)).toEqual(['fail:job-2', 'pending:job-3'])
   expect(text(1)).toEqual(['2 more'])
   // The layout keeps the header, the PR list and the buttons: the checks get the rest.
-  expect(paneLayout(30)).toEqual({ listRows: 2, focusRows: 23, checkRows: 20 })
-  expect(paneLayout(40).listRows).toBe(4)
+  expect(paneLayout(30)).toEqual({ listRows: 6, cardRows: 19 })
+  expect(paneLayout(40)).toEqual({ listRows: 6, cardRows: 29 })
 })
 
 test('focuses the pinned PR, else the newest running one', async () => {
@@ -120,9 +120,9 @@ test('keeps a narrow pane inside its cells: whole badge, tally and times, long n
     expect(await ui.find({ type: 'Text', text: ' ✗1 ' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: ' 1m05s' })).toBeDefined()
     // The title and a check's name are cut to the cells left beside them, never wrapped.
-    const title = await ui.find({ type: 'Text', text: ' Retry…' })
+    const title = await ui.find({ type: 'Text', text: ' Retr…' })
     expect(title).toBeDefined()
-    const link = await ui.find({ type: 'Link', text: 'fail-job…' })
+    const link = await ui.find({ type: 'Link', text: 'fail-jo…' })
     expect(link).toBeDefined()
     await ui.unmount()
   }
@@ -280,4 +280,39 @@ test('tells Claude the result when onFinish is tell-claude', { options: { onFini
   // Settled and told once: later ticks do not tell it again.
   await clock.advance(60000)
   expect(session.appended().filter(row => row.origin.kind === 'plugin')).toHaveLength(1)
+})
+
+test('stacks a card per PR and scrolls them inside their rows', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-09T10:00:00Z') })
+  const other = 'https://github.com/acme/app/pull/43'
+  for (const event of ['command.register', 'ui.status', 'ui.toast'] as const) on(event, () => ({ value: undefined }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: 'no checks reported', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const urls = [URL, other]
+  on('tool.call', { tool: 'Bash' }, () => {
+    const url = urls.shift() ?? other
+    return { result: { stdout: url, stderr: '' }, text: url } as never
+  })
+
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' })
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' })
+  await clock.advance(1000)
+
+  const ui = await $.ui.mount({
+    plugin: 'ci-watch',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'ci-watch',
+    props: { title: 'CI', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 16 }, view: {} } as never,
+  })
+  // The newest PR's card fills the four rows; the older one waits below.
+  expect(await ui.find({ key: `${other}:0` })).toBeDefined()
+  expect(await ui.find({ key: `${URL}:0` })).toBeUndefined()
+  await ui.press({ key: 'down' })
+  await ui.press({ key: 'down' })
+  expect(await ui.find({ key: `${URL}:0` })).toBeDefined()
+  expect(await ui.find({ key: `${other}:0` })).toBeUndefined()
+  await ui.unmount()
 })
