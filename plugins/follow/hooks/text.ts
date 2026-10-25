@@ -13,7 +13,13 @@ export function lineOf(text: string, index: number): number {
   return n
 }
 
-export const clean = (line: string) => line.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+const MAX_LINE = 1000
+
+/** A line safe to draw: control characters dropped, and a minified bundle's megabyte line cut, which blanks the pane. */
+export const clean = (line: string) => {
+  const text = line.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+  return text.length > MAX_LINE ? `${text.slice(0, MAX_LINE)}…` : text
+}
 
 /** A label as one line: whitespace runs (a heredoc's newlines) folded, a leading `cd <dir> &&` dropped. */
 export function oneLine(label: string): string {

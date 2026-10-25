@@ -5,7 +5,7 @@ import { trim } from './capture'
 import { buildHunk, diffRows } from './diff'
 import { autoTop, cellWidth, clip, codeLayout, expandTabs, shortenPath, thumb, wrapCells, wrapRows } from './layout'
 import { grepFiles, isScratchPath, namedPaths, parseShell, shellDir } from './parse'
-import { lineOf, oneLine, splitLines } from './text'
+import { clean, lineOf, oneLine, splitLines } from './text'
 
 test('finds the line an edit lands on', async () => {
   const text = 'a\nb\nc\nneedle\ne\n'
@@ -226,4 +226,9 @@ test('reads the files a Grep matched, with the first matching line', () => {
     { path: '/abs/b.ts', line: null },
   ])
   expect(grepFiles('src/a.ts:3')).toEqual([{ path: 'src/a.ts', line: null }])
+})
+
+test('cuts a megabyte line, as a minified bundle has, before it is drawn', async () => {
+  expect(clean('x'.repeat(3_000_000)).length).toBeLessThan(2000)
+  expect(clean('short\x01')).toBe('short')
 })
