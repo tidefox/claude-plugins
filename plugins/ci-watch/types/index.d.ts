@@ -30,9 +30,19 @@ export type WatchedPr = {
   rerunAt: number | null
 }
 
+/** A GitHub Actions run in progress, whether or not a watched PR started it. */
+export type WorkflowRun = {
+  url: string
+  name: string
+  title: string
+  branch: string
+  event: string
+  startedAt: number | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
     /** `pinned`: the PR url the pane holds in view; null follows the newest running PR. `scroll`: the cards' top row. */
-    'ci-watch': { prs: WatchedPr[]; now: number; paneShown: boolean; pinned: string | null; scroll: number }
+    'ci-watch': { prs: WatchedPr[]; now: number; paneShown: boolean; pinned: string | null; scroll: number; runs: WorkflowRun[] }
   }
 }

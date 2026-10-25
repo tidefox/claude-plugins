@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { checkLines, findPr, focusOf, paneLayout, parseChecks, phaseOf, wrapCells } from './register'
+import { checkLines, findPr, focusOf, paneLayout, parseChecks, parseRuns, phaseOf, wrapCells } from './register'
 
 const URL = 'https://github.com/acme/app/pull/42'
 
@@ -48,8 +48,8 @@ test('fits the checks list to its rows: failures first, passed and skipped colla
   expect(text(2)).toEqual(['fail:job-2', 'pending:job-3'])
   expect(text(1)).toEqual(['2 more'])
   // The layout keeps the header, the PR list and the buttons: the checks get the rest.
-  expect(paneLayout(30)).toEqual({ listRows: 6, cardRows: 19 })
-  expect(paneLayout(40)).toEqual({ listRows: 6, cardRows: 29 })
+  expect(paneLayout(30)).toEqual({ listRows: 6, cardRows: 13 })
+  expect(paneLayout(40)).toEqual({ listRows: 6, cardRows: 23 })
 })
 
 test('focuses the pinned PR, else the newest running one', async () => {
@@ -165,6 +165,9 @@ test('watches a PR the agent opens until CI settles', async ($, on) => {
   on('ui.notify', () => ({ value: { isSent: true, channel: 'terminal_bell' } }) as never)
   on('process.run', (_, e) => {
     const argv = e.argv
+    if (argv[1] === 'run') {
+      return { value: { exitCode: 0, stdout: '[]', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+    }
     if (argv[2] === 'view') {
       return { value: { exitCode: 0, stdout: JSON.stringify({ title: 'Add retries', isDraft: true, headRefName: 'feat' }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
     }
@@ -323,4 +326,10 @@ test('stacks a card per PR and scrolls them inside their rows', async ($, on) =>
   expect(await ui.find({ key: `${URL}:0` })).toBeDefined()
   expect(await ui.find({ key: `${other}:0` })).toBeUndefined()
   await ui.unmount()
+})
+
+test('reads in-progress runs from gh run list', () => {
+  const [run] = parseRuns(JSON.stringify([{ url: 'u', workflowName: 'ci', displayTitle: 't', headBranch: 'main', event: 'push', startedAt: '2026-10-09T10:00:00Z' }]))
+  expect(run).toMatchObject({ url: 'u', name: 'ci', branch: 'main' })
+  expect(run?.startedAt).toBe(Date.parse('2026-10-09T10:00:00Z'))
 })

@@ -15,7 +15,8 @@ A Claude Code mod that watches CI on pull requests the agent drafts or opens.
   skipped checks collapse to a count when one PR's checks would fill the window). Below it, a
   Pull requests block of six fixed rows lists the watched PRs (a whole row lights under the pointer); click one to pin it, `f` to follow the
   newest running PR again. Buttons along the bottom: **re-run failed**, **refresh** (`u`),
-  **unwatch**, **clear settled**. Before any PR is watched the same layout draws blank, with
+  **unwatch**, **clear settled**. Between the list and the buttons, a **Running actions** block lists every
+  GitHub Actions run in progress in the session's repo and the watched PRs' repos (`gh run list`), whoever started it. Before any PR is watched the same layout draws blank, with
   an `○ IDLE` chip and a legend.
 - **Block background:** a shade dimmer than the terminal (by theme). Set `blockBackground` in
   `/config` to `none`, or to any color such as `#1e1e2e`.

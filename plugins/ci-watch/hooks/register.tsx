@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, UiScrollInput, UiScrollResult } from 'claude-code'
 
-import type { Check, CheckBucket, Phase, WatchedPr } from '../types'
+import type { Check, CheckBucket, Phase, WatchedPr, WorkflowRun } from '../types'
 
 const PANE = 'ci-watch'
 /** The dock width asked for beside a fullscreen transcript, as follow asks; the person's own drag wins. */
@@ -16,6 +16,7 @@ const now = atom({ plugin: 'ci-watch', key: 'now' } as const, 0)
 const paneShown = atom({ plugin: 'ci-watch', key: 'paneShown' } as const, false)
 const pinned = atom({ plugin: 'ci-watch', key: 'pinned' } as const, null)
 const scroll = atom({ plugin: 'ci-watch', key: 'scroll' } as const, 0)
+const runs = atom({ plugin: 'ci-watch', key: 'runs' } as const, [])
 
 const PR_URL = /https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g
 const PR_REF = /([\w.-]+\/[\w.-]+)#(\d+)/
@@ -84,6 +85,18 @@ export function parseChecks(stdout: string): Check[] {
   }))
 }
 
+export function parseRuns(stdout: string): WorkflowRun[] {
+  const rows = JSON.parse(stdout) as Record<string, unknown>[]
+  return rows.map(row => ({
+    url: String(row.url ?? ''),
+    name: String(row.workflowName ?? row.name ?? ''),
+    title: String(row.displayTitle ?? ''),
+    branch: String(row.headBranch ?? ''),
+    event: String(row.event ?? ''),
+    startedAt: toTime(row.startedAt),
+  }))
+}
+
 export function phaseOf(checks: Check[]): Phase {
   if (checks.length === 0) return 'waiting'
   if (checks.some(c => c.bucket === 'pending')) return 'running'
@@ -148,6 +161,8 @@ export function focusOf(list: WatchedPr[], pin: string | null): WatchedPr | unde
 
 /** Rows the PR list always shows. */
 const LIST_ROWS = 6
+/** Rows the running-actions block always shows. */
+const RUN_ROWS = 4
 /** Rows a wheel tick or j/k moves the cards. */
 const SCROLL_STEP = 3
 /** The cards' first row from the pane's top: the header, then a gap. */
@@ -155,10 +170,11 @@ const CARDS_TOP = 2
 
 /**
  * The fixed layout's rows, top to bottom: header, gap, the cards (one per PR, scrolling
- * inside their rows), gap + heading + six rows for the PR list, and the buttons.
+ * inside their rows), gap + heading + six rows for the PR list, the same with four rows for
+ * the running actions, and the buttons.
  */
 export function paneLayout(bodyRows: number) {
-  return { listRows: LIST_ROWS, cardRows: Math.max(4, bodyRows - CARDS_TOP - (2 + LIST_ROWS) - 1) }
+  return { listRows: LIST_ROWS, cardRows: Math.max(4, bodyRows - CARDS_TOP - (2 + LIST_ROWS) - (2 + RUN_ROWS) - 1) }
 }
 
 /** A scrollbar's thumb over `rows` cells for a window at `top` of `total`: where it starts and how long. */
@@ -373,9 +389,39 @@ async function poll($: EngineInterface, pr: WatchedPr) {
   }
 }
 
+let runsAt = 0
+let runsBusy = false
+
+/** Every GitHub Actions run in progress, whatever started it: the session's repo and each watched PR's. */
+async function pollRuns($: EngineInterface, list: WatchedPr[]) {
+  if (runsBusy) return
+  runsBusy = true
+  try {
+    const fields = 'url,workflowName,displayTitle,headBranch,event,startedAt'
+    const repos = [...new Set(list.map(pr => pr.repo))]
+    const found = await Promise.all(
+      [[], ...repos.map(r => ['-R', r])].map(async target => {
+        const res = await $.process.run(['gh', 'run', 'list', '--status', 'in_progress', '--limit', '20', '--json', fields, ...target])
+        return res.exitCode === 0 && res.stdout.trim().startsWith('[') ? parseRuns(res.stdout) : []
+      }),
+    )
+    const all = [...new Map(found.flat().map(r => [r.url, r])).values()]
+    await update($, runs, () => all.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0)))
+  } catch {
+    // gh missing or signed out: the PR polls already say so.
+  } finally {
+    runsBusy = false
+  }
+}
+
 async function tick($: EngineInterface) {
   const t = await $.clock.now()
   const list = await read($, prs)
+  if ((await read($, paneShown)) && t - runsAt >= pollMs) {
+    runsAt = t
+    void pollRuns($, list)
+  }
+  if ((await read($, runs)).length > 0) await update($, now, () => t)
   if (list.some(isActive)) await update($, now, () => t)
   for (const pr of list) {
     if (isActive(pr) && (pr.polledAt === null || t - pr.polledAt >= pollMs)) void poll($, pr)
@@ -487,6 +533,7 @@ export const register: Register = (on, options) => {
     // A terminal without OSC 8 draws a Link's text then its whole URL: the terminal gets the URL as its own row instead.
     const isDesktop = e.surface === 'desktop'
     const list = await read($, prs)
+    const running = await read($, runs)
     const pin = await read($, pinned)
     const t = Math.max(await read($, now), await $.clock.now())
     const width = Math.max(24, e.props.bodyColumns)
@@ -734,6 +781,26 @@ export const register: Register = (on, options) => {
       )
     }
 
+    const runRow = (run: WorkflowRun) => {
+      const age = run.startedAt === null ? '' : duration(t - run.startedAt)
+      const flow = clip(run.name, Math.floor(inner / 3))
+      const room = inner - 2 - cellWidth(flow) - 3 - (age ? age.length + 1 : 0)
+      const label = `${flow} › ${clip(`${run.title}${run.branch ? ` ⎇ ${run.branch}` : ''}`, room)}`
+      return (
+        <Box key={`r:${run.url}`} flexDirection="row" height={1}>
+          <Box flexShrink={0}>
+            <Text color="warning">{spin} </Text>
+          </Box>
+          <Box flexGrow={1} flexShrink={1}>
+            <Text wrap="truncate-end">{isDesktop ? <Link href={run.url}>{label}</Link> : label}</Text>
+          </Box>
+          <Box flexShrink={0}>
+            <Text dimColor>{age ? ` ${age}` : ''}</Text>
+          </Box>
+        </Box>
+      )
+    }
+
     // Every PR's card, the focused one first, a blank row between: the window shows the rows from the scrolled top.
     const cardList = focus ? [focus, ...list.filter(pr => pr !== focus)] : []
     const cardLines = cardList.flatMap((pr, i) => [...(i > 0 ? [null] : []), ...card(pr)])
@@ -800,6 +867,17 @@ export const register: Register = (on, options) => {
             {heading('Pull requests', list.length > layout.listRows ? `${layout.listRows} of ${list.length}` : String(list.length))}
             {isIdle ? <Text dimColor>○ none yet</Text> : ''}
             {list.slice(0, layout.listRows).map(prRow)}
+          </Box>,
+        )}
+
+        {block(
+          'runs',
+          'warning',
+          RUN_ROWS + 1,
+          <Box flexDirection="column">
+            {heading('Running actions', running.length > RUN_ROWS ? `${RUN_ROWS} of ${running.length}` : String(running.length))}
+            {running.length === 0 ? <Text dimColor>○ nothing running</Text> : ''}
+            {running.slice(0, RUN_ROWS).map(runRow)}
           </Box>,
         )}
 
