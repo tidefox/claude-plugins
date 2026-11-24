@@ -25,8 +25,7 @@ A Claude Code mod that watches CI on pull requests the agent drafts or opens.
 - **Sidebar:** like follow, it asks for a 64-column dock beside the transcript in Claude Code's
   fullscreen layout (`CLAUDE_CODE_NO_FLICKER=1 claude`, 110+ columns); otherwise it opens above
   the prompt.
-- **Status line** summary (`CI #42 ◐ 5/8 ✗1`), and a one-line band above the prompt when the
-  pane can't be placed (narrow terminal).
+- **Band:** a one-line summary above the prompt when the pane can't be placed (narrow terminal).
 - **Beside the prompt** (fullscreen layout): the same summary as a small chip right of the input,
   colored by state. It drops out when typing leaves no room.
 - **Edge strip** (fullscreen layout): a one-column bar down the left edge behind the transcript.

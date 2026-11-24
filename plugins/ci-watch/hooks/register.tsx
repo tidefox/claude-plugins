@@ -951,18 +951,6 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // A one-line band for when the pane waits undrawn (a narrow terminal it opened on unasked).
-  // A short chip in the footer's right-hand labels: the newest PR's CI state, `CI #101 ✓` or `CI 3/5`.
-  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
-    const list = await read($, prs)
-    // Reading `now` redraws the chip as a running PR polls.
-    await read($, now)
-    const pr = list.find(isActive) ?? list[0]
-    const state = pr ? ciState(pr) : null
-    if (!state) return next(e)
-    return next({ ...e, props: { ...e.props, modes: [...e.props.modes, state] } })
-  }).catch(($, e, next) => next(e))
-
   // Beside the prompt, in the fullscreen layout: the same few cells, drawn by a Client that also reports the window's focus.
   on('ui.render', { component: 'BesidePrompt' }, async ($, e, next) => {
     if (e.plugin !== 'ci-watch' || (e.surface !== 'terminal' && e.surface !== 'desktop')) return next(e)
