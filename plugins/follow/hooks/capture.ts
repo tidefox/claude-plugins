@@ -1,6 +1,6 @@
 import type { EngineInterface, ToolCallInput, ToolCallResult } from 'claude-code'
 
-import type { Activity, ActivityKind, FileView } from '../types'
+import type { Activity, ActivityKind, DiffView, FileView } from '../types'
 import { buildHunk } from './diff'
 import { BINARY, isScratchPath, namedPaths, parseShell, resultText, grepFiles, shellDir } from './parse'
 import { EDIT_CONTEXT, HUNK_CAP, MAX_ACTIVITIES, MAX_FILE_CHARS, MAX_VIEWS, OUTPUT_LINES, READ_WINDOW, env, settings } from './state'
@@ -41,6 +41,37 @@ export async function fileLines($: EngineInterface, path: string): Promise<strin
   const lines = text === null ? null : splitLines(text).map(clean)
   shownFile = stat && lines ? { path, size: stat.size, mtimeMs: stat.mtimeMs, lines } : null
   return lines
+}
+
+/** The last Git diff asked for, kept while the file holds and a few seconds pass: a commit changes it with the file untouched. */
+let shownDiff: { path: string; size: number; mtimeMs: number; at: number; result: DiffView | string } | null = null
+const DIFF_TTL_MS = 5000
+
+/** The file against what is checked out, as a diff view, or a few words saying why there is none. */
+export async function gitDiff($: EngineInterface, path: string): Promise<DiffView | string> {
+  const stat = await $.fs.stat(path).catch(() => null)
+  const now = await $.clock.now()
+  const at = shownDiff
+  if (stat && at && at.path === path && at.size === stat.size && at.mtimeMs === stat.mtimeMs && now - at.at < DIFF_TTL_MS) return at.result
+  const result = await askGit($, path)
+  shownDiff = stat ? { path, size: stat.size, mtimeMs: stat.mtimeMs, at: now, result } : null
+  return result
+}
+
+async function askGit($: EngineInterface, path: string): Promise<DiffView | string> {
+  const copy = await $.vcs.detect({ path: path.slice(0, path.lastIndexOf('/')) || '/' }).catch(() => null)
+  if (!copy) return 'not in a Git working copy'
+  if (!path.startsWith(`${copy.root}/`)) return 'outside the working copy'
+  const rel = path.slice(copy.root.length + 1)
+  const diff = await $.vcs.diff({ path: copy.root, vcs: copy.vcs, base: 'head', paths: [rel] }).catch(() => null)
+  if (!diff || diff.files === undefined) return 'Git could not diff this file'
+  const file = diff.files.find(f => f.path === rel)
+  if (!file) return 'no changes since the last commit'
+  if (file.isBinary) return 'a binary file'
+  if (!file.patch) return file.isUntracked ? 'not in Git yet' : 'no changes since the last commit'
+  const rows = file.patch.split('\n')
+  const hunk = rows.slice(0, HUNK_CAP).join('\n')
+  return { mode: 'diff', path, hunk, line: 1, isCut: rows.length > HUNK_CAP, added: file.added, removed: file.removed }
 }
 
 function sourceView(path: string, lines: string[], from: number, to: number, pad: number, limit: number): FileView {

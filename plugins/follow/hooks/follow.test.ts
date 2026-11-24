@@ -6,6 +6,8 @@ import { buildHunk, diffRows } from './diff'
 import { autoTop, cellWidth, clip, codeLayout, expandTabs, shortenPath, thumb, wrapCells, wrapRows } from './layout'
 import { grepFiles, isScratchPath, namedPaths, parseShell, shellDir } from './parse'
 import { clean, lineOf, oneLine, splitLines } from './text'
+import { pathRuns } from './paths'
+import { env } from './state'
 
 test('finds the line an edit lands on', async () => {
   const text = 'a\nb\nc\nneedle\ne\n'
@@ -231,4 +233,25 @@ test('reads the files a Grep matched, with the first matching line', () => {
 test('cuts a megabyte line, as a minified bundle has, before it is drawn', async () => {
   expect(clean('x'.repeat(3_000_000)).length).toBeLessThan(2000)
   expect(clean('short\x01')).toBe('short')
+})
+
+test('underlines the paths the agent touched, whole, at word edges', async () => {
+  env.root = '/work/app'
+  const act = (path: string, kind: Activity['kind']) => ({ path, kind }) as Activity
+  // Newest first: the edit of main.ts wins over its older read.
+  const list = [act('/work/app/src/main.ts', 'edit'), act('/work/app/src/main.ts', 'read'), act('/work/app/Makefile', 'read')]
+  const text = 'fix src/main.ts:12 then main.ts, not domain.tsx or /work/app/src/main.ts. Makefile too'
+  const runs = pathRuns(text, list)
+  const at = (s: string, from = 0) => text.indexOf(s, from)
+  expect(runs).toEqual([
+    { start: at('src/main.ts'), end: at('src/main.ts') + 11, underline: true, color: 'warning' },
+    { start: at(' main.ts') + 1, end: at(' main.ts') + 8, underline: true, color: 'warning' },
+    { start: at('/work/app/src/main.ts'), end: at('/work/app/src/main.ts') + 21, underline: true, color: 'warning' },
+    // At the project's top, its relative path is its bare name.
+    { start: at('Makefile'), end: at('Makefile') + 8, underline: true, color: 'suggestion' },
+  ])
+  // A name with no extension is matched only as a path; nothing touched, nothing painted.
+  expect(pathRuns('Makefile', [act('/elsewhere/Makefile', 'read')])).toEqual([])
+  expect(pathRuns('anything', [])).toEqual([])
+  env.root = ''
 })

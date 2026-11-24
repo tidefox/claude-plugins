@@ -6,8 +6,11 @@ import { plan, trim, mirror } from './capture'
 import type { Plan } from './capture'
 import { ago, footerWhat, shortPath } from './labels'
 import { clip, shortenPath } from './layout'
+import { renderDrift, restDrift, wakeDrift } from './drift'
 import { renderPane, scrollPane } from './pane'
-import { BADGE, DOCK_MIN_COLUMNS, LINGER_MS, PANE, SIDEBAR_COLUMNS, env, settings } from './state'
+import { pathRuns } from './paths'
+import { BADGE, DOCK_MIN_COLUMNS, LINGER_MS, OUTPUT_LINES, PANE, SIDEBAR_COLUMNS, env, settings } from './state'
+import { clean, splitLines } from './text'
 
 // The engine reads a file's state by scanning it, so each file that reads or writes these declares them itself.
 const activities = atom({ plugin: 'follow', key: 'activities' } as const, [])
@@ -54,6 +57,7 @@ export const register: Register = (on, options) => {
   // The status line names what the agent is doing; once the turn ends it is doing nothing.
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
+      restDrift()
       // Redraw the footer now, and again once the finished call's linger has run out.
       $.ui.invalidate('ui.render')
       $.clock.after(LINGER_MS + 500, () => $.ui.invalidate('ui.render'))
@@ -95,6 +99,7 @@ export const register: Register = (on, options) => {
     } catch {
       return next(e)
     }
+    wakeDrift($)
     const activity: Activity = {
       ...p.activity,
       id: e.tool_use_id,
@@ -133,6 +138,54 @@ export const register: Register = (on, options) => {
 
     return ran
   }).catch(($, e, next) => next(e))
+
+  // Paths the agent touched are underlined in the draft, in the color of what it did to them.
+  on('prompt.edit', async ($, e, next) => {
+    const box = await next(e)
+    try {
+      const runs = pathRuns(box.text, await read($, activities))
+      return runs.length === 0 ? box : { ...box, decorations: [...(box.decorations ?? []), ...runs] }
+    } catch {
+      return box
+    }
+  })
+  // A recalled history entry, a clear or a fill changes the draft with no edit: paint it too.
+  on('prompt.change', async ($, e, next) => {
+    try {
+      const runs = pathRuns(e.text, await read($, activities))
+      if (runs.length > 0) void $.prompt.paint({ text: e.text, decorations: runs }).catch(() => {})
+    } catch {}
+    return next(e)
+  })
+
+  // A subagent's report joins the trail as it is handed back, read but never changed.
+  on('agent.report', async ($, e, next) => {
+    const result = await next(e)
+    // Its own catch: a fallback that ran `next` again would deliver the report twice.
+    try {
+      const lines = splitLines(e.text).map(clean)
+      const report: Activity = {
+        id: `report:${e.agentId}`,
+        agentId: e.agentId,
+        agentType: e.subagentType,
+        tool: 'report',
+        kind: 'report',
+        isScratch: false,
+        path: null,
+        line: null,
+        endLine: null,
+        label: `${e.subagentType}: ${lines.find(l => l.trim() !== '')?.trim() ?? e.status}`,
+        added: null,
+        removed: null,
+        phase: e.status === 'completed' ? 'done' : 'error',
+        at: await $.clock.now(),
+        view: { mode: 'output', command: '', lines: lines.slice(0, OUTPUT_LINES), isCut: lines.length > OUTPUT_LINES, isFailed: e.status !== 'completed', isReport: true },
+      }
+      const keep = await read($, pinned)
+      await update($, activities, list => trim([report, ...list.filter(a => a.id !== report.id)], keep))
+    } catch {}
+    return result
+  })
 
   // The footer's right side, beside the statusline: what the main agent is doing now, so it shows with the pane closed.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
@@ -181,6 +234,9 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, renderPane)
+
+  // Behind the fullscreen transcript, lines of the agent's latest work drift up and fade while it works.
+  on('ui.render', { component: 'Underlay' }, ($, e, next) => (e.plugin === 'follow' && e.surface === 'terminal' ? renderDrift($, e) : next(e))).catch(($, e, next) => next(e))
 
   // The wheel over the code window scrolls the code, not the pane: the layout is fixed.
   on('ui.scroll', { component: 'Pane', requestId: PANE }, scrollPane).catch(($, e, next) => next(e))

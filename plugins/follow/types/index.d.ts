@@ -1,4 +1,4 @@
-export type ActivityKind = 'read' | 'edit' | 'write' | 'search' | 'shell' | 'plan' | 'web' | 'agent' | 'other'
+export type ActivityKind = 'read' | 'edit' | 'write' | 'search' | 'shell' | 'plan' | 'web' | 'agent' | 'report' | 'other'
 
 /** A window of a file's lines, `focusFrom..focusTo` (1-based, inclusive) marked in the gutter. */
 export type SourceView = {
@@ -13,8 +13,8 @@ export type SourceView = {
 /** One unified-diff hunk (header included) of what an edit or write changed. */
 export type DiffView = { mode: 'diff'; path: string; hunk: string; line: number; isCut: boolean; added: number; removed: number }
 
-/** What a shell command printed: stdout, then stderr, `isCut` when only the first lines are kept. */
-export type OutputView = { mode: 'output'; command: string; lines: string[]; isCut: boolean; isFailed: boolean }
+/** What a shell command printed: stdout, then stderr, `isCut` when only the first lines are kept. A subagent's report, `isReport`, is the same with no prompt. */
+export type OutputView = { mode: 'output'; command: string; lines: string[]; isCut: boolean; isFailed: boolean; isReport?: boolean }
 
 export type FileView = SourceView | DiffView | OutputView
 
@@ -36,6 +36,8 @@ export type Activity = {
   added: number | null
   removed: number | null
   phase: 'running' | 'done' | 'error'
+  /** A report row's agent type, kept since the agent list may drop a finished agent. */
+  agentType?: string
   /** The edit or write was held for the machine owner to review: the file is unchanged. */
   isHeld?: boolean
   at: number
@@ -52,6 +54,8 @@ declare module 'claude-code' {
       scroll: { id: string; top: number } | null
       /** How far the person scrolled the Files and Trail lists, in rows from the newest. */
       lists: { files: number; trail: number }
+      /** Whether the code window shows the focused file's diff against Git's last commit. */
+      git: boolean
     }
   }
 }

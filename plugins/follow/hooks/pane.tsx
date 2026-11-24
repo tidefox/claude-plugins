@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderInput, UiScrollInput, UiScrollResult } from 'claude-code'
 
 import type { Activity, ActivityKind } from '../types'
-import { fileLines, mirror, relative } from './capture'
+import { fileLines, gitDiff, mirror, relative } from './capture'
 import { diffRows } from './diff'
 import { ago, fitActivity } from './labels'
 import type { CodeRow } from './layout'
@@ -17,6 +17,8 @@ const pinned = atom({ plugin: 'follow', key: 'pinned' } as const, null)
 const scroll = atom({ plugin: 'follow', key: 'scroll' } as const, null)
 /** How far the person scrolled the Files and Trail lists, in rows from the newest. */
 const lists = atom({ plugin: 'follow', key: 'lists' } as const, { files: 0, trail: 0 })
+/** Whether the code window shows the focused file against Git's last commit. */
+const git = atom({ plugin: 'follow', key: 'git' } as const, false)
 
 type PaneRender = Extract<RenderInput, { component: 'Pane' }>
 type PaneScroll = UiScrollInput
@@ -89,7 +91,12 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
   // Every loop's activity, the main agent's and each subagent's, newest first.
   const pool = list
   const pinnedOne = list.find(a => a.id === pin)
-  const focus = pinnedOne ?? pool.find(a => a.view !== null) ?? pool.find(a => a.path !== null)
+  const focused = pinnedOne ?? pool.find(a => a.view !== null) ?? pool.find(a => a.path !== null)
+  // Git mode swaps the view for the whole file's diff against the last commit, or says why there is none.
+  const isGit = await read($, git)
+  const gitView = isGit && focused?.path ? await gitDiff($, focused.path) : null
+  const gitNote = typeof gitView === 'string' ? gitView : null
+  const focus = focused && gitView && typeof gitView !== 'string' ? { ...focused, view: gitView } : focused
   const isIdle = list.length === 0
 
   // The header names the agent whose move is on show.
@@ -97,7 +104,12 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
   let who = isIdle ? 'waiting for Claude' : 'main agent'
   if (shownAgent !== null) {
     const agent = (await $.agent.list().catch(() => [])).find(a => a.id === shownAgent)
-    who = agent ? `${agent.type}: ${agent.description}` : 'subagent'
+    who = agent ? `${agent.type}: ${agent.description}` : focus?.agentType ? `${focus.agentType} report` : 'subagent'
+    // What the agent runs on and has cost so far; cost only where it is billed.
+    const model = agent?.model?.replace(/^claude-/, '')
+    const usd = agent?.cost?.usd ?? 0
+    if (model) who += ` · ${model}`
+    if (usd > 0) who += ` · $${usd.toFixed(2)}`
   }
 
   const badge = (a: Activity) => (
@@ -152,17 +164,25 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
     const room = fit(diff, 4)
     codeRows = wrapOnce(view.hunk, room, () => diff)
     codeAuto = Math.max(0, codeRows.findIndex(r => r.t !== ' ') - HUNK_CONTEXT)
-    place = (from, to) => `diff lines ${from.line + 1}–${to.line + 1} of ${diff.length}${view.isCut ? ' (cut)' : ''}`
+    const what = gitView ? 'git diff vs HEAD, lines' : 'diff lines'
+    place = (from, to) => `${what} ${from.line + 1}–${to.line + 1} of ${diff.length}${view.isCut ? ' (cut)' : ''}`
   } else if (focus?.view?.mode === 'output') {
     const view = focus.view
     // The tail is what a command's output is usually read for: start at the end.
     // A terminal has no gutter: the command after a prompt, its output, then the prompt waiting again.
     gutter = 0
     const room = Math.max(8, inner - 1)
-    codeRows = wrapOnce(view, room, () => [`${PROMPT}${view.command}`, ...view.lines, PROMPT].map((text, i) => ({ text, t: ' ' as const, old: i, new: i })))
-    codeAuto = Math.max(0, codeRows.length - layout.codeRows)
-    place = (from, to) => `output lines ${Math.max(1, from.new)}–${Math.min(to.new, view.lines.length)} of ${view.lines.length}${view.isCut ? ' (cut)' : ''}${view.isFailed ? ' · interrupted' : ''}`
-  } else if (focus?.path) {
+    if (view.isReport) {
+      // A report reads from its start, with no prompt around it.
+      codeRows = wrapOnce(view, room, () => view.lines.map((text, i) => ({ text, t: ' ' as const, old: i + 1, new: i + 1 })))
+      codeAuto = 0
+      place = (from, to) => `report lines ${from.new}–${to.new} of ${view.lines.length}${view.isCut ? ' (cut)' : ''}${view.isFailed ? ' · did not finish' : ''}`
+    } else {
+      codeRows = wrapOnce(view, room, () => [`${PROMPT}${view.command}`, ...view.lines, PROMPT].map((text, i) => ({ text, t: ' ' as const, old: i, new: i })))
+      codeAuto = Math.max(0, codeRows.length - layout.codeRows)
+      place = (from, to) => `output lines ${Math.max(1, from.new)}–${Math.min(to.new, view.lines.length)} of ${view.lines.length}${view.isCut ? ' (cut)' : ''}${view.isFailed ? ' · interrupted' : ''}`
+    }
+  } else if (focus?.path && gitNote === null) {
     const whole = await fileLines($, focus.path)
     const view = focus.view?.mode === 'source' ? focus.view : null
     const lines = whole ?? view?.lines ?? []
@@ -189,13 +209,14 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
 
   const TONE = { ' ': undefined, '+': '#0e2705', '-': '#370603' } as const
   const drawCode = () => {
-    if (shown.length === 0) return <Text dimColor>(no preview)</Text>
+    if (shown.length === 0) return <Text dimColor>{gitNote ? `git: ${gitNote}` : '(no preview)'}</Text>
     if (focus?.view?.mode === 'output') {
+      const { isReport } = focus.view
       const end = focus.view.lines.length + 1
       return (
         <Box flexDirection="column">
           {shown.map((row, i) => {
-            const isPrompt = row.new === 0 || row.new === end
+            const isPrompt = !isReport && (row.new === 0 || row.new === end)
             if (!isPrompt) return <Text key={`t:${top + i}`} wrap="truncate-end">{row.text || ' '}</Text>
             // Only a prompt's first row carries the `$`; a wrapped command goes on beneath it.
             const isFirst = row.part === 0
@@ -515,6 +536,7 @@ export async function renderPane($: EngineInterface, e: PaneRender) {
         <Button key="down" label="↓" hotkey="j" onPress={() => scrollCode($, SCROLL_STEP)} />
         <Button key="top" label="top" hotkey="t" onPress={() => scrollCode($, -codeTotal)} />
         <Button key="end" label="end" hotkey="e" onPress={() => scrollCode($, codeTotal)} />
+        <Button key="git" label={isGit ? 'file' : 'git'} hotkey="g" onPress={() => update($, git, v => !v)} />
         {settings.nvimServer ? <Button key="nvim" label="nvim" hotkey="n" onPress={() => (focus ? mirror($, focus) : undefined)} /> : ''}
         {/* The row's free right side: what the whole session has touched. */}
         <Box flexGrow={1} flexShrink={1} justifyContent="flex-end">

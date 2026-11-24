@@ -34,6 +34,7 @@ export const BADGE: Record<ActivityKind, { label: string; color: string }> = {
   plan: { label: 'PLAN', color: 'planMode' },
   web: { label: 'WEB', color: 'permission' },
   agent: { label: 'AGENT', color: 'claude' },
+  report: { label: 'REPORT', color: 'claude' },
   other: { label: 'TOOL', color: 'inactive' },
 }
 /** How long a finished call stays in the footer. */
