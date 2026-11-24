@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { checkLines, findPr, focusOf, paneLayout, parseChecks, parseRuns, phaseOf, wrapCells } from './register'
+import { STRIP_FADE_MS, UNFOCUSED_SLOWDOWN, checkLines, ciState, findPr, focusOf, paneLayout, parseChecks, parseRuns, phaseOf, stripOf, wrapCells } from './register'
+import type { WatchedPr } from '../types'
 
 const URL = 'https://github.com/acme/app/pull/42'
 
@@ -332,4 +333,68 @@ test('reads in-progress runs from gh run list', () => {
   const [run] = parseRuns(JSON.stringify([{ url: 'u', workflowName: 'ci', displayTitle: 't', headBranch: 'main', event: 'push', startedAt: '2026-10-09T10:00:00Z' }]))
   expect(run).toMatchObject({ url: 'u', name: 'ci', branch: 'main' })
   expect(run?.startedAt).toBe(Date.parse('2026-10-09T10:00:00Z'))
+})
+
+test('says the CI state in a few cells, and lights the edge strip by it', async () => {
+  const check = (bucket: string) => ({ name: bucket, workflow: 'ci', bucket, link: '', startedAt: null, completedAt: null }) as WatchedPr['checks'][number]
+  const pr = (phase: WatchedPr['phase'], buckets: string[], finishedAt: number | null = null) =>
+    ({ number: 42, phase, checks: buckets.map(check), finishedAt }) as WatchedPr
+  expect(ciState(pr('running', ['pass', 'pending', 'fail', 'pending']))).toBe('CI #42 2/4 ✗1')
+  expect(ciState(pr('passed', ['pass']))).toBe('CI #42 ✓')
+  expect(ciState(pr('no-ci', []))).toBeNull()
+
+  // Running: lit bottom-up by the share done, red once anything failed.
+  expect(stripOf(pr('running', ['pass', 'pending', 'pending', 'pending']), 0)).toEqual({ lit: 0.25, color: '#8a6410' })
+  expect(stripOf(pr('running', ['fail', 'pending']), 0)).toEqual({ lit: 0.5, color: '#8a1c1c' })
+  expect(stripOf(pr('failed', ['fail']), 0)).toEqual({ lit: 1, color: '#8a1c1c' })
+  // A pass shows green a while, then goes out.
+  expect(stripOf(pr('passed', ['pass'], 1000), 1000 + STRIP_FADE_MS - 1)).toEqual({ lit: 1, color: '#1f6e2a' })
+  expect(stripOf(pr('passed', ['pass'], 1000), 1000 + STRIP_FADE_MS)).toBeNull()
+  expect(stripOf(pr('no-ci', []), 0)).toBeNull()
+})
+
+test('a chip beside the prompt and a strip behind the transcript follow a running PR; polling rests while the window is away', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-09T10:00:00Z') })
+  const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never
+  for (const event of ['command.register', 'ui.status', 'ui.toast'] as const) on(event, () => ({ value: undefined }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.message', () => ({}) as never)
+  let polls = 0
+  on('process.run', (_, e) => {
+    if (e.argv[2] === 'view') return ok(JSON.stringify({ title: 'Add drift', isDraft: false, headRefName: 'feat/drift' }))
+    if (e.argv[2] === 'checks') polls++
+    return ok(e.argv[1] === 'run' ? '[]' : checks(['pass', 'pending', 'pending', 'pending']))
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: URL, stderr: '' }, text: URL }) as never)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' })
+  await clock.advance(1000)
+
+  const chip = await $.ui.mount({ plugin: 'ci-watch', surface: 'terminal', component: 'BesidePrompt', props: { maxColumns: 30, floatRows: 0, floatColumns: 0 } as never })
+  expect((await chip.find({ type: 'Client' }))?.props).toMatchObject({ key: 'ci-chip', props: { text: 'CI #42 1/4', color: 'warning' } })
+
+  const strip = await $.ui.mount({ plugin: 'ci-watch', surface: 'terminal', component: 'Underlay', props: { columns: 80, rows: 20, isWorking: false, view: { kind: 'main' }, plugins: ['ci-watch'] } as never })
+  // A quarter done: 5 of 20 rows lit at the bottom, the rest dim.
+  expect(await strip.find({ type: 'Box', key: 'lit' })).toMatchObject({ props: { height: 5, backgroundColor: '#8a6410' } })
+  expect(await strip.find({ type: 'Box', key: 'rest' })).toMatchObject({ props: { height: 15 } })
+
+  // Focused, a 15 s poll interval: four polls in a minute. With the window away, one.
+  polls = 0
+  await clock.advance(60_000)
+  const focused = polls
+  await chip.setWindowFocused(false)
+  polls = 0
+  await clock.advance(60_000)
+  expect(focused).toBeGreaterThanOrEqual(4)
+  expect(polls).toBeLessThanOrEqual(Math.ceil(focused / UNFOCUSED_SLOWDOWN))
+  await chip.setWindowFocused(true)
+  polls = 0
+  await clock.advance(60_000)
+  expect(polls).toBeGreaterThanOrEqual(4)
+
+  // No room beside the prompt: no chip.
+  const narrow = await $.ui.mount({ plugin: 'ci-watch', surface: 'terminal', component: 'BesidePrompt', props: { maxColumns: 4, floatRows: 0, floatColumns: 0 } as never })
+  expect(await narrow.find({ type: 'Client' })).toBeUndefined()
+  for (const ui of [chip, strip, narrow]) await ui.unmount()
 })

@@ -4,7 +4,9 @@ A Claude Code mod that watches CI on pull requests the agent drafts or opens.
 
 - **Detects** `gh pr create` (draft or not) and `gh pr ready` in any Bash call, plus GitHub MCP
   `create_pull_request` / ready-for-review tools, and reads the PR URL from the output.
-- **Polls** `gh pr checks <url>` every 15s (configurable) until every check settles.
+- **Polls** `gh pr checks <url>` every 15s (configurable) until every check settles, four times
+  slower while the terminal window is in the background (known in the fullscreen layout, from
+  the chip beside the prompt).
 - **Pane:** the same OpenCode-style fixed layout as [follow](../follow), in Claude's orange: a
   header with a `● LIVE` / `◎ PINNED` / `○ SETTLED` chip, then a card for every watched PR,
   the focused one first, stacked and scrolling inside the pane (mouse wheel, `j` / `k`, a
@@ -25,6 +27,11 @@ A Claude Code mod that watches CI on pull requests the agent drafts or opens.
   the prompt.
 - **Status line** summary (`CI #42 ◐ 5/8 ✗1`), and a one-line band above the prompt when the
   pane can't be placed (narrow terminal).
+- **Beside the prompt** (fullscreen layout): the same summary as a small chip right of the input,
+  colored by state. It drops out when typing leaves no room.
+- **Edge strip** (fullscreen layout): a one-column bar down the left edge behind the transcript.
+  Amber fills it from the bottom as checks finish, red once one fails, and green for 30 seconds
+  after CI passes. It shows only in blank cells, never under text.
 - **On finish**: a toast and a desktop notification. Optionally (`onFinish` in `/config`) it
   leaves Claude a note with the result (`tell-claude`), or starts a turn asking Claude to fix
   the failing checks (`fix-failures`).

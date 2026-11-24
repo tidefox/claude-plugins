@@ -268,6 +268,35 @@ async function rowHover($: EngineInterface): Promise<string> {
 
 let pollMs = 15000
 let onFinish = 'notify'
+/** Whether the window has the focus, as the chip beside the prompt reports it; true until it says otherwise. */
+let isWindowFocused = true
+/** Polling rests while nobody is looking: this many times slower with the window in the background. */
+export const UNFOCUSED_SLOWDOWN = 4
+/** How long the edge strip stays green after CI passes. */
+export const STRIP_FADE_MS = 30_000
+const STRIP = { running: '#8a6410', fail: '#8a1c1c', pass: '#1f6e2a', rest: '#2b2108' }
+
+/** The newest PR's CI in a few cells: `CI #101 ✓`, `CI #101 3/5 ✗1`, or null with nothing to say. */
+export function ciState(pr: WatchedPr): string | null {
+  if (pr.phase === 'no-ci') return null
+  const done = pr.checks.filter(c => c.bucket !== 'pending').length
+  const fails = pr.checks.filter(c => c.bucket === 'fail' || c.bucket === 'cancel').length
+  const state =
+    pr.phase === 'running' ? `${done}/${pr.checks.length}${fails > 0 ? ` ✗${fails}` : ''}` : pr.phase === 'passed' ? '✓' : pr.phase === 'failed' ? `✗${fails}` : pr.phase === 'waiting' ? '◌' : '⚠'
+  return `CI #${pr.number} ${state}`
+}
+
+/** The edge strip: how much of it is lit, bottom up, and in what color; null draws none. */
+export function stripOf(pr: WatchedPr, t: number): { lit: number; color: string } | null {
+  const fails = pr.checks.some(c => c.bucket === 'fail' || c.bucket === 'cancel')
+  if (pr.phase === 'running' || pr.phase === 'waiting') {
+    const done = pr.checks.filter(c => c.bucket !== 'pending').length
+    return { lit: pr.checks.length === 0 ? 0 : done / pr.checks.length, color: fails ? STRIP.fail : STRIP.running }
+  }
+  if (pr.phase === 'failed') return { lit: 1, color: STRIP.fail }
+  if (pr.phase === 'passed' && pr.finishedAt !== null && t - pr.finishedAt < STRIP_FADE_MS) return { lit: 1, color: STRIP.pass }
+  return null
+}
 const inFlight = new Set<string>()
 
 function patch($: EngineInterface, url: string, fields: Partial<WatchedPr>) {
@@ -417,14 +446,17 @@ async function pollRuns($: EngineInterface, list: WatchedPr[]) {
 async function tick($: EngineInterface) {
   const t = await $.clock.now()
   const list = await read($, prs)
-  if ((await read($, paneShown)) && t - runsAt >= pollMs) {
+  const every = isWindowFocused ? pollMs : pollMs * UNFOCUSED_SLOWDOWN
+  if ((await read($, paneShown)) && t - runsAt >= every) {
     runsAt = t
     void pollRuns($, list)
   }
   if ((await read($, runs)).length > 0) await update($, now, () => t)
-  if (list.some(isActive)) await update($, now, () => t)
+  // A pass keeps the edge strip lit a while: keep redrawing until it goes out.
+  const isFading = list.some(pr => pr.phase === 'passed' && pr.finishedAt !== null && t - pr.finishedAt < STRIP_FADE_MS + TICK_MS)
+  if (list.some(isActive) || isFading) await update($, now, () => t)
   for (const pr of list) {
-    if (isActive(pr) && (pr.polledAt === null || t - pr.polledAt >= pollMs)) void poll($, pr)
+    if (isActive(pr) && (pr.polledAt === null || t - pr.polledAt >= every)) void poll($, pr)
   }
 }
 
@@ -926,12 +958,47 @@ export const register: Register = (on, options) => {
     // Reading `now` redraws the chip as a running PR polls.
     await read($, now)
     const pr = list.find(isActive) ?? list[0]
-    if (!pr || pr.phase === 'no-ci') return next(e)
-    const done = pr.checks.filter(c => c.bucket !== 'pending').length
-    const fails = pr.checks.filter(c => c.bucket === 'fail' || c.bucket === 'cancel').length
-    const state =
-      pr.phase === 'running' ? `${done}/${pr.checks.length}${fails > 0 ? ` ✗${fails}` : ''}` : pr.phase === 'passed' ? '✓' : pr.phase === 'failed' ? `✗${fails}` : pr.phase === 'waiting' ? '◌' : '⚠'
-    return next({ ...e, props: { ...e.props, modes: [...e.props.modes, `CI #${pr.number} ${state}`] } })
+    const state = pr ? ciState(pr) : null
+    if (!state) return next(e)
+    return next({ ...e, props: { ...e.props, modes: [...e.props.modes, state] } })
+  }).catch(($, e, next) => next(e))
+
+  // Beside the prompt, in the fullscreen layout: the same few cells, drawn by a Client that also reports the window's focus.
+  on('ui.render', { component: 'BesidePrompt' }, async ($, e, next) => {
+    if (e.plugin !== 'ci-watch' || (e.surface !== 'terminal' && e.surface !== 'desktop')) return next(e)
+    const list = await read($, prs)
+    await read($, now)
+    const pr = list.find(isActive) ?? list[0]
+    const text = pr ? ciState(pr) : null
+    if (!pr || !text || e.props.maxColumns < cellWidth(text)) return next(e)
+    const { Client } = $.ui.resolve(e)
+    return <Client key="ci-chip" module="./chip.ts" width={cellWidth(text)} props={{ text, color: BADGE[pr.phase].color }} />
+  }).catch(($, e, next) => next(e))
+
+  on('ui.message', async ($, e, next) => {
+    const data = e.data as { isFocused?: unknown } | null
+    if (e.element === 'ci-chip' && typeof data?.isFocused === 'boolean') isWindowFocused = data.isFocused
+    return next(e)
+  })
+
+  // Down the left edge behind the fullscreen transcript (the right is where panes dock): amber filling
+  // bottom-up as checks finish, red on a failure, green for a while after a pass.
+  on('ui.render', { component: 'Underlay' }, async ($, e, next) => {
+    if (e.plugin !== 'ci-watch' || e.surface !== 'terminal') return next(e)
+    const list = await read($, prs)
+    const t = Math.max(await read($, now), await $.clock.now())
+    const pr = list.find(isActive) ?? list[0]
+    const strip = pr ? stripOf(pr, t) : null
+    if (!strip) return next(e)
+    const { Box } = $.ui.resolve(e)
+    const rows = e.props.rows
+    const lit = Math.round(rows * strip.lit)
+    return (
+      <Box position="absolute" left={0} top={0} width={1} height={rows} flexDirection="column">
+        {lit < rows ? <Box key="rest" height={rows - lit} backgroundColor={STRIP.rest} /> : ''}
+        {lit > 0 ? <Box key="lit" height={lit} backgroundColor={strip.color} /> : ''}
+      </Box>
+    )
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
